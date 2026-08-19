@@ -68,3 +68,4 @@ main { display: grid; grid-template-columns: 320px 1fr 1fr; flex: 1; min-height:
 .kv .k { color: #888; }
 .curl { white-space: pre-wrap; word-break: break-all; }
 button.copy { margin: 4px 0; }
+.ins-empty .hint { font-style: italic; }

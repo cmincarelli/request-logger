@@ -1,8 +1,17 @@
-// Logger reader UI. Polls the active session for new events, renders a timeline,
-// an endpoint explorer, and a per-call inspector with curl export.
+// Logger reader UI. Polls the active session for new events, renders a stable
+// append-only timeline, an endpoint explorer, and a per-call inspector with
+// curl export.
 
 const $ = (id) => document.getElementById(id);
-const state = { sessionId: null, lastSeq: 0, events: [], selected: null };
+const state = {
+  sessionId: null,
+  lastSeq: 0,
+  events: [],
+  selected: null,         // seq of the selected event
+  renderedSeqs: new Set(), // seqs already in the DOM
+  filter: "",
+  nearBottom: true,
+};
 
 // ─── session picker ───────────────────────────────────────────────────
 async function loadSessions() {
@@ -31,9 +40,13 @@ function reset() {
   state.lastSeq = 0;
   state.events = [];
   state.selected = null;
+  state.renderedSeqs = new Set();
+  state.nearBottom = true;
   $("event-list").innerHTML = "";
   $("endpoint-list").innerHTML = "";
-  $("inspector-body").innerHTML = '<p class="hint">select an event</p>';
+  $("inspector-body").innerHTML = '<p class="hint">select a request to inspect</p>';
+  $("event-count").textContent = "";
+  $("endpoint-count").textContent = "";
   poll();
 }
 
@@ -45,10 +58,18 @@ async function poll() {
       `/api/sessions/${encodeURIComponent(state.sessionId)}/events?since=${state.lastSeq}`
     ).then((r) => r.json());
     if (r.ok && r.data.events.length) {
+      const wasEmpty = state.events.length === 0;
       state.events.push(...r.data.events);
       state.lastSeq = r.data.lastSeq;
-      renderTimeline();
+      for (const evt of r.data.events) appendEvent(evt);
+      $("event-count").textContent = `(${state.events.length})`;
       renderEndpoints();
+      // auto-select the first http event so the inspector isn't empty
+      if (wasEmpty && state.selected == null) {
+        const firstHttp = state.events.find((e) => e.kind === "http");
+        if (firstHttp) selectBySeq(firstHttp.seq);
+      }
+      if (state.nearBottom) $("event-list").scrollTop = $("event-list").scrollHeight;
     }
   } catch (e) {
     /* ignore transient */
@@ -62,35 +83,65 @@ $("live").addEventListener("change", () => {
   if ($("live").checked) poll();
 });
 
-// ─── timeline ─────────────────────────────────────────────────────────
-function renderTimeline() {
+// track scroll so we only auto-stick to bottom when the user is already there
+$("event-list").addEventListener("scroll", () => {
+  const el = $("event-list");
+  state.nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+});
+
+// ─── timeline (append-only) ───────────────────────────────────────────
+function appendEvent(evt) {
+  if (state.renderedSeqs.has(evt.seq)) return;
+  state.renderedSeqs.add(evt.seq);
+  if (!matchesFilter(evt)) return;
+  const row = buildRow(evt);
+  $("event-list").appendChild(row);
+}
+
+function buildRow(evt) {
+  const row = document.createElement("div");
+  row.className = `event ev-${evt.kind}`;
+  row.dataset.seq = evt.seq;
+  const t = document.createElement("span");
+  t.className = "ev-t";
+  t.textContent = new Date(evt.t).toLocaleTimeString();
+  const kind = document.createElement("span");
+  kind.className = "ev-kind";
+  kind.textContent = evt.kind.toUpperCase();
+  const text = document.createElement("span");
+  text.className = "ev-text";
+  text.textContent = summary(evt);
+  row.append(t, kind, text);
+  row.onclick = () => selectEvent(evt, row);
+  if (state.selected === evt.seq) row.classList.add("selected");
+  return row;
+}
+
+function matchesFilter(evt) {
+  const f = state.filter;
+  if (!f) return true;
+  const s = summary(evt).toLowerCase();
+  // also match the raw method so "POST" filters work
+  return s.includes(f);
+}
+
+// full rebuild (used on filter change / session reset)
+function rebuildTimeline() {
   const list = $("event-list");
-  const filter = $("filter").value.toLowerCase();
+  list.innerHTML = "";
   const frag = document.createDocumentFragment();
   for (const evt of state.events) {
-    const row = document.createElement("div");
-    row.className = `event ev-${evt.kind}`;
-    row.dataset.seq = evt.seq;
-    row.textContent = "";
-    const t = document.createElement("span");
-    t.className = "ev-t";
-    t.textContent = new Date(evt.t).toLocaleTimeString();
-    const kind = document.createElement("span");
-    kind.className = "ev-kind";
-    kind.textContent = evt.kind.toUpperCase();
-    const text = document.createElement("span");
-    text.className = "ev-text";
-    text.textContent = summary(evt);
-    row.append(t, kind, text);
-    if (filter && !row.textContent.toLowerCase().includes(filter)) continue;
-    row.onclick = () => selectEvent(evt, row);
-    if (state.selected === evt.seq) row.classList.add("selected");
-    frag.appendChild(row);
+    if (!matchesFilter(evt)) continue;
+    frag.appendChild(buildRow(evt));
   }
-  list.innerHTML = "";
   list.appendChild(frag);
   $("event-count").textContent = `(${state.events.length})`;
 }
+
+$("filter").addEventListener("input", (e) => {
+  state.filter = e.target.value.toLowerCase();
+  rebuildTimeline();
+});
 
 function summary(evt) {
   if (evt.kind === "http") {
@@ -122,13 +173,9 @@ function preview(s) {
   return t.length < String(s).length ? t + "…" : t;
 }
 
-$("filter").addEventListener("input", renderTimeline);
-
 // ─── endpoints ────────────────────────────────────────────────────────
-let endpointsCache = [];
-async function renderEndpoints() {
+function renderEndpoints() {
   if (!state.events.length) return;
-  // compute client-side from current events for snappy updates
   const groups = new Map();
   for (const evt of state.events) {
     if (evt.kind !== "http") continue;
@@ -143,16 +190,16 @@ async function renderEndpoints() {
     const key = `${h.method} ${p.origin}${tpl}`;
     let g = groups.get(key);
     if (!g) {
-      g = { method: h.method, origin: p.origin, tpl, count: 0, statuses: {}, ws: false };
+      g = { method: h.method, origin: p.origin, tpl, count: 0, statuses: {} };
       groups.set(key, g);
     }
     g.count++;
     g.statuses[h.status] = (g.statuses[h.status] || 0) + 1;
   }
-  endpointsCache = [...groups.values()].sort((a, b) => b.count - a.count);
+  const sorted = [...groups.values()].sort((a, b) => b.count - a.count);
   const list = $("endpoint-list");
   list.innerHTML = "";
-  for (const g of endpointsCache) {
+  for (const g of sorted) {
     const row = document.createElement("div");
     row.className = "endpoint";
     const m = document.createElement("div");
@@ -167,14 +214,14 @@ async function renderEndpoints() {
       .map((s) => `${s}(${g.statuses[s]})`)
       .join(" ")}`;
     row.append(m, path, meta);
-    row.onclick = () => filterToEndpoint(g);
+    row.onclick = () => {
+      state.filter = `${g.method} ${g.tpl}`.toLowerCase();
+      $("filter").value = `${g.method} ${g.tpl}`;
+      rebuildTimeline();
+    };
     list.appendChild(row);
   }
-  $("endpoint-count").textContent = `(${endpointsCache.length})`;
-}
-function filterToEndpoint(g) {
-  $("filter").value = `${g.method} ${g.tpl}`;
-  renderTimeline();
+  $("endpoint-count").textContent = `(${sorted.length})`;
 }
 
 function templatePath(pathname) {
@@ -191,6 +238,12 @@ function templatePath(pathname) {
 }
 
 // ─── inspector ─────────────────────────────────────────────────────────
+function selectBySeq(seq) {
+  const row = $("event-list").querySelector(`.event[data-seq="${seq}"]`);
+  const evt = state.events.find((e) => e.seq === seq);
+  if (evt && row) selectEvent(evt, row);
+}
+
 function selectEvent(evt, row) {
   state.selected = evt.seq;
   document.querySelectorAll(".event.selected").forEach((e) => e.classList.remove("selected"));
@@ -206,14 +259,23 @@ function renderHttpInspector(evt, body) {
   const h = evt.data;
   body.appendChild(section("Request", `${h.method} ${h.url}`));
   body.appendChild(kvSection("Request headers", h.requestHeaders));
-  if (h.requestBody != null)
-    body.appendChild(prettySection("Request body", h.requestBody, h.requestBodyTruncated));
+  body.appendChild(
+    h.requestBody != null
+      ? prettySection("Request body", h.requestBody, h.requestBodyTruncated)
+      : placeholder("Request body", "none")
+  );
   body.appendChild(kvSection("Response headers", h.responseHeaders));
-  if (h.responseBody != null)
-    body.appendChild(
-      prettySection("Response body", h.responseBody, h.responseBodyTruncated, h.responseBodyBase64)
-    );
-  body.appendChild(section("Meta", `status ${h.status} ${h.statusText}  ${h.resourceType}  ${h.durationMs || 0}ms`));
+  body.appendChild(
+    h.responseBody != null
+      ? prettySection("Response body", h.responseBody, h.responseBodyTruncated, h.responseBodyBase64)
+      : placeholder("Response body", h.status === 0 ? "no response" : "none")
+  );
+  body.appendChild(
+    section(
+      "Meta",
+      `status ${h.status} ${h.statusText}  ${h.resourceType}  ${h.durationMs || 0}ms`
+    )
+  );
   const btn = document.createElement("button");
   btn.className = "copy";
   btn.textContent = "copy curl";
@@ -229,7 +291,9 @@ function renderWsInspector(evt, body) {
   const w = evt.data;
   body.appendChild(section("WebSocket", `${w.direction} ${w.url} (opcode ${w.opcode})`));
   body.appendChild(
-    prettySection("Payload", w.payload, w.payloadTruncated, w.base64)
+    w.payload
+      ? prettySection("Payload", w.payload, w.payloadTruncated, w.base64)
+      : placeholder("Payload", "empty")
   );
 }
 
@@ -238,6 +302,7 @@ function renderUiInspector(evt, body) {
   body.appendChild(section("UI event", u.type));
   if (u.target) body.appendChild(kvSection("Target", u.target));
   if (u.value != null) body.appendChild(section("Value", u.value));
+  else body.appendChild(placeholder("Value", "none"));
   if (u.meta) body.appendChild(kvSection("Meta", u.meta));
 }
 
@@ -247,15 +312,22 @@ function section(title, text) {
   d.innerHTML = `<h3>${title}</h3><div class="kv">${esc(text)}</div>`;
   return d;
 }
+function placeholder(title, reason) {
+  const d = document.createElement("div");
+  d.className = "ins-section ins-empty";
+  d.innerHTML = `<h3>${title}</h3><div class="kv hint">${reason}</div>`;
+  return d;
+}
 function kvSection(title, obj) {
   const d = document.createElement("div");
   d.className = "ins-section";
   const h = document.createElement("h3");
   h.textContent = title;
   const pre = document.createElement("pre");
-  pre.textContent = Object.entries(obj)
-    .map(([k, v]) => `${k}: ${v}`)
-    .join("\n");
+  const entries = Object.entries(obj);
+  pre.textContent = entries.length
+    ? entries.map(([k, v]) => `${k}: ${v}`).join("\n")
+    : "— none —";
   d.append(h, pre);
   return d;
 }
