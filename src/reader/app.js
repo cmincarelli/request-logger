@@ -130,11 +130,6 @@ function appendEvent(evt) {
   if (state.renderedSeqs.has(evt.seq)) return;
   state.renderedSeqs.add(evt.seq);
 
-  if (filteredMode()) {
-    if (matchesFilter(evt) && visible(evt)) $("page-list").appendChild(buildRow(evt));
-    return;
-  }
-
   const boundary = pageBoundary(evt);
   if (boundary) {
     // Every navigation opens a fresh group. The one exception: an `install` UI
@@ -154,6 +149,8 @@ function appendEvent(evt) {
     return; // the boundary event is the header, not a child row
   }
   if (!visible(evt)) return;
+  // when a filter is active, only render children that match the filter
+  if (state.filter && !matchesFilter(evt)) return;
   ensureGroup();
   appendChildRow(evt);
 }
@@ -244,31 +241,29 @@ function rebuild() {
   list.innerHTML = "";
   state.groups = [];
   state.currentGroup = null;
-  if (filteredMode()) {
-    const frag = document.createDocumentFragment();
-    for (const evt of state.events) {
-      if (!matchesFilter(evt) || !visible(evt)) continue;
-      frag.appendChild(buildRow(evt));
-    }
-    list.appendChild(frag);
-  } else {
-    for (const evt of state.events) {
-      const boundary = pageBoundary(evt);
-      if (boundary) {
-        // skip install UI marker when a Document for the same URL follows it
-        if (
-          evt.data.type === "install" &&
-          state.events.some(
-            (e) => e.seq > evt.seq && e.kind === "http" && e.data.resourceType === "Document" && e.data.url === boundary.url
-          )
-        ) {
-          continue;
-        }
-        openGroup(boundary.url, boundary.status, boundary.kind);
-      } else if (visible(evt)) {
-        ensureGroup();
-        appendChildRow(evt);
+  for (const evt of state.events) {
+    const boundary = pageBoundary(evt);
+    if (boundary) {
+      // skip install UI marker when a Document for the same URL follows it
+      if (
+        evt.data.type === "install" &&
+        state.events.some(
+          (e) => e.seq > evt.seq && e.kind === "http" && e.data.resourceType === "Document" && e.data.url === boundary.url
+        )
+      ) {
+        continue;
       }
+      openGroup(boundary.url, boundary.status, boundary.kind);
+    } else if (visible(evt) && (!state.filter || matchesFilter(evt))) {
+      ensureGroup();
+      appendChildRow(evt);
+    }
+  }
+  // when filtering, drop page groups whose URL doesn't match AND have no children
+  if (state.filter) {
+    for (const g of state.groups) {
+      const urlMatch = (g.url || "").toLowerCase().includes(state.filter);
+      if (!urlMatch && g.count === 0) g.groupEl.remove();
     }
   }
   $("page-count").textContent = `(${state.groups.length} pages, ${state.events.length} events)`;
@@ -352,6 +347,7 @@ function renderInspector(evt) {
 
 function renderHttpInspector(evt, body) {
   const h = evt.data;
+  body.appendChild(metaCard(httpMeta(h)));
   body.appendChild(section("Request", `${h.method} ${h.url}`));
   body.appendChild(kvSection("Request headers", h.requestHeaders));
   body.appendChild(
@@ -365,7 +361,6 @@ function renderHttpInspector(evt, body) {
       ? prettySection("Response body", h.responseBody, h.responseBodyTruncated, h.responseBodyBase64)
       : placeholder("Response body", h.status === 0 ? "no response" : "none")
   );
-  body.appendChild(section("Meta", `status ${h.status} ${h.statusText}  ${h.resourceType}  ${h.durationMs || 0}ms`));
   const btn = document.createElement("button");
   btn.className = "copy";
   btn.textContent = "copy curl";
@@ -405,16 +400,57 @@ function renderHttpInspector(evt, body) {
 }
 function renderWsInspector(evt, body) {
   const w = evt.data;
-  body.appendChild(section("WebSocket", `${w.direction} ${w.url} (opcode ${w.opcode})`));
+  body.appendChild(metaCard([{ k: "type", v: "WebSocket" }, { k: "direction", v: w.direction }, { k: "opcode", v: w.opcode }, { k: "url", v: w.url }]));
   body.appendChild(w.payload ? prettySection("Payload", w.payload, w.payloadTruncated, w.base64) : placeholder("Payload", "empty"));
 }
 function renderUiInspector(evt, body) {
   const u = evt.data;
+  body.appendChild(metaCard(uiMeta(u)));
   body.appendChild(section("UI event", u.type));
   if (u.target) body.appendChild(kvSection("Target", u.target));
   if (u.value != null) body.appendChild(section("Value", u.value));
   else body.appendChild(placeholder("Value", "none"));
   if (u.meta) body.appendChild(kvSection("Meta", u.meta));
+}
+
+// Build the meta key/values for the summary card at the top of the inspector.
+function httpMeta(h) {
+  const rows = [
+    { k: "method", v: h.method, cls: "m-" + h.method },
+    { k: "url", v: h.url, cls: "meta-url" },
+    { k: "status", v: h.status + (h.statusText ? " " + h.statusText : ""), cls: h.status >= 400 ? "meta-warn" : (h.status >= 200 && h.status < 300 ? "meta-ok" : "") },
+    { k: "type", v: h.resourceType },
+    { k: "duration", v: (h.durationMs || 0) + "ms" },
+  ];
+  if (h.failed) rows.push({ k: "error", v: h.errorText || "failed", cls: "meta-warn" });
+  return rows;
+}
+function uiMeta(u) {
+  const rows = [{ k: "type", v: "UI · " + u.type, cls: "ev-ui" }];
+  if (u.target && u.target.tag) rows.push({ k: "target", v: (u.target.id ? "#" + u.target.id : u.target.css || u.target.tag) });
+  if (u.target && u.target.text) rows.push({ k: "label", v: u.target.text, cls: "meta-url" });
+  if (u.meta) for (const [k, v] of Object.entries(u.meta)) rows.push({ k, v: String(v) });
+  return rows;
+}
+
+// A pretty key/value summary card pinned to the top of the inspector.
+function metaCard(rows) {
+  const card = document.createElement("div");
+  card.className = "meta-card";
+  for (const r of rows) {
+    const row = document.createElement("div");
+    row.className = "meta-row";
+    const k = document.createElement("span");
+    k.className = "meta-k";
+    k.textContent = r.k;
+    const v = document.createElement("span");
+    v.className = "meta-v " + (r.cls || "");
+    v.textContent = String(r.v);
+    if (r.k === "url" || r.k === "target") v.title = String(r.v);
+    row.append(k, v);
+    card.appendChild(row);
+  }
+  return card;
 }
 
 function section(title, text) {
@@ -474,6 +510,44 @@ $("auth-btn").onclick = async () => {
   const r = await fetch(`/api/sessions/${state.sessionId}/auth`).then((r) => r.json());
   console.log("auth snapshot", r.data.auth);
 };
+
+// ─── export / import session logs ────────────────────────────────────
+// Sessions are plain JSONL; export downloads the current one, import uploads
+// a previously-exported .jsonl so you can review past captures again.
+$("export-btn").onclick = () => {
+  if (!state.sessionId) return;
+  const a = document.createElement("a");
+  a.href = `/api/sessions/${encodeURIComponent(state.sessionId)}/download`;
+  a.download = `${state.sessionId}.jsonl`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+};
+
+$("import-file").addEventListener("change", async (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  const text = await file.text();
+  try {
+    const r = await fetch("/api/sessions/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-ndjson" },
+      body: text,
+    }).then((r) => r.json());
+    if (r.ok) {
+      alert(`imported as ${r.data.id}`);
+      await loadSessions();
+      state.sessionId = r.data.id;
+      $("session").value = r.data.id;
+      reset();
+    } else {
+      alert("import failed: " + r.error);
+    }
+  } catch (err) {
+    alert("import failed: " + err);
+  }
+  e.target.value = "";
+});
 
 // ─── resizable divider ────────────────────────────────────────────────
 function setupDividers() {

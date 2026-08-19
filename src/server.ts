@@ -2,13 +2,21 @@ import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
-import { config } from "./config.js";
+import { writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import { config, newSessionId } from "./config.js";
 import { listSessions, readEvents, lastSeq } from "./log.js";
 import type { EventEnvelope, HttpEvent } from "./schema.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const app = Fastify({ logger: false });
+
+// Accept raw string bodies for the import endpoint (JSONL upload).
+app.addContentTypeParser(
+  ["application/x-ndjson", "text/plain", "application/octet-stream"],
+  { parseAs: "string" },
+  (_req, body, done) => done(null, body)
+);
 
 await app.register(fastifyStatic, {
   root: join(__dirname, "reader"),
@@ -97,6 +105,46 @@ app.get<{ Params: { id: string } }>("/api/sessions/:id/auth", async (req, reply)
     if (cookie) auth.set("Cookie", cookie);
   }
   return { ok: true, data: { auth: Object.fromEntries(auth) } };
+});
+
+app.get<{ Params: { id: string } }>("/api/sessions/:id/download", async (req, reply) => {
+  const sessions = listSessions(config.logDir);
+  const s = sessions.find((x) => x.id === req.params.id);
+  if (!s) return reply.code(404).send({ ok: false, error: "session not found" });
+  if (!existsSync(s.path)) return reply.code(404).send({ ok: false, error: "file missing" });
+  // stream the raw JSONL as an attachment
+  reply.header("Content-Type", "application/x-ndjson; charset=utf-8");
+  reply.header(
+    "Content-Disposition",
+    `attachment; filename="${req.params.id}.jsonl"`
+  );
+  return reply.send(readFileSync(s.path));
+});
+
+// Import a previously-exported session JSONL. Body is the raw file content
+// (Content-Type: application/x-ndjson or text/plain). Writes it under LOG_DIR.
+app.post("/api/sessions/import", async (req, reply) => {
+  const body = req.body;
+  if (typeof body !== "string" && !Buffer.isBuffer(body))
+    return reply.code(400).send({ ok: false, error: "expected raw JSONL body" });
+  const text = Buffer.isBuffer(body) ? body.toString("utf8") : body;
+  // validate: each non-empty line must be valid JSON with the event shape
+  const lines = text.split("\n").filter((l) => l.trim());
+  if (!lines.length) return reply.code(400).send({ ok: false, error: "empty" });
+  for (const l of lines) {
+    try {
+      const e = JSON.parse(l) as EventEnvelope;
+      if (typeof e.seq !== "number" || typeof e.kind !== "string")
+        return reply.code(400).send({ ok: false, error: "not a logger event line" });
+    } catch {
+      return reply.code(400).send({ ok: false, error: "invalid JSON line" });
+    }
+  }
+  mkdirSync(config.logDir, { recursive: true });
+  const id = newSessionId();
+  const path = join(config.logDir, `${id}.jsonl`);
+  writeFileSync(path, text);
+  return { ok: true, data: { id, path } };
 });
 
 export function templatePath(pathname: string): string {

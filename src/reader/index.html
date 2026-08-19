@@ -18,6 +18,10 @@
         </label>
         <label><input id="live" type="checkbox" checked /> live</label>
         <label><input id="show-assets" type="checkbox" /> assets</label>
+        <button id="export-btn" title="download the current session as a .jsonl file">export</button>
+        <label class="import-label">import
+          <input id="import-file" type="file" accept=".jsonl,application/x-ndjson,text/plain" hidden />
+        </label>
         <button id="catalogue-btn" title="dump endpoint catalogue to console">catalogue</button>
         <button id="auth-btn" title="dump auth snapshot to console">auth</button>
       </div>
