@@ -123,7 +123,7 @@ app.get<{ Params: { id: string } }>("/api/sessions/:id/download", async (req, re
 
 // Import a previously-exported session JSONL. Body is the raw file content
 // (Content-Type: application/x-ndjson or text/plain). Writes it under LOG_DIR.
-app.post("/api/sessions/import", async (req, reply) => {
+app.post("/api/sessions/import", { bodyLimit: 256 * 1024 * 1024 }, async (req, reply) => {
   const body = req.body;
   if (typeof body !== "string" && !Buffer.isBuffer(body))
     return reply.code(400).send({ ok: false, error: "expected raw JSONL body" });
