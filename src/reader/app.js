@@ -731,75 +731,35 @@ function renderGraph() {
     if (graph.raf) cancelAnimationFrame(graph.raf), (graph.raf = 0);
     const ctx = graph.ctx;
     ctx.clearRect(0, 0, graph.canvas.clientWidth, graph.canvas.clientHeight);
-    ctx.fillStyle = "#aaa"; ctx.font = "12px sans-serif";
+    ctx.fillStyle = "#8a93a8"; ctx.font = "12px sans-serif";
     ctx.fillText("no calls in this page", 12, 20);
     graph.nodes = []; graph.edges = [];
     return;
   }
-  // place nodes in a circle initially
+  // spawn on a small gentle ring so nodes start separated (not clumped at
+  // centre, which causes a violent expansion). Fade-in hides any residual jitter.
   const W = graph.canvas.clientWidth, H = graph.canvas.clientHeight;
   const cx = W / 2, cy = H / 2;
-  const byHost = new Map(nodes.map((n) => [n.host, { ...n, x: cx, y: cy, vx: 0, vy: 0, r: 8 + Math.sqrt(n.calls) * 4 }]));
-  const R = Math.min(W, H) * 0.3;
+  const byHost = new Map(nodes.map((n) => [n.host, { ...n, x: cx, y: cy, vx: 0, vy: 0, r: 10 + Math.sqrt(n.calls) * 5 }]));
+  const R0 = Math.min(W, H) * 0.18;
   let i = 0;
   for (const n of byHost.values()) {
     const a = (i++ / byHost.size) * Math.PI * 2;
-    n.x = cx + Math.cos(a) * R + (Math.random() - 0.5) * 8;
-    n.y = cy + Math.sin(a) * R + (Math.random() - 0.5) * 8;
+    n.x = cx + Math.cos(a) * R0;
+    n.y = cy + Math.sin(a) * R0;
   }
   graph.nodes = [...byHost.values()];
   graph.edges = edges.map((e) => ({ ...e, from: byHost.get(e.from), to: byHost.get(e.to) })).filter((e) => e.from && e.to);
   graph.byHost = byHost;
   graph.t0 = performance.now();
-  if (!graph.raf) stepGraph();
+  if (!graph.raf) tickGraph();
 }
 
-function stepGraph() {
-  const ns = graph.nodes, es = graph.edges;
-  const W = graph.canvas.clientWidth, H = graph.canvas.clientHeight;
-  const cx = W / 2, cy = H / 2;
-  // forces
-  for (const a of ns) { a.fx = 0; a.fy = 0; }
-  // repulsion
-  for (let i = 0; i < ns.length; i++) {
-    for (let j = i + 1; j < ns.length; j++) {
-      const a = ns[i], b = ns[j];
-      let dx = a.x - b.x, dy = a.y - b.y;
-      let d2 = dx * dx + dy * dy || 0.01;
-      let f = 9000 / d2;
-      const d = Math.sqrt(d2);
-      dx /= d; dy /= d;
-      a.fx += dx * f; a.fy += dy * f;
-      b.fx -= dx * f; b.fy -= dy * f;
-    }
-  }
-  // springs along edges
-  for (const e of es) {
-    const a = e.from, b = e.to;
-    let dx = b.x - a.x, dy = b.y - a.y;
-    let d = Math.hypot(dx, dy) || 0.01;
-    const L = 120;
-    let f = (d - L) * 0.05;
-    dx /= d; dy /= d;
-    a.fx += dx * f; a.fy += dy * f;
-    b.fx -= dx * f; b.fy -= dy * f;
-  }
-  // centre gravity (the sim settles; the "life" is a visual pulse in draw, not motion)
-  for (const a of ns) {
-    a.fx += (cx - a.x) * 0.01;
-    a.fy += (cy - a.y) * 0.01;
-  }
-  // integrate
-  for (const a of ns) {
-    a.vx = (a.vx + a.fx) * 0.85; a.vy = (a.vy + a.fy) * 0.85;
-    a.x += a.vx; a.y += a.vy;
-    // keep inside the canvas
-    const m = a.r + 4;
-    a.x = Math.max(m, Math.min(W - m, a.x));
-    a.y = Math.max(m, Math.min(H - m - 14, a.y));
-  }
+// No force simulation / movement on spawn — nodes are placed statically and
+// only the glow pulses. The RAF loop just re-draws so the pulse animates.
+function tickGraph() {
   drawGraph();
-  graph.raf = requestAnimationFrame(stepGraph);
+  graph.raf = requestAnimationFrame(tickGraph);
 }
 
 function drawGraph() {
@@ -815,7 +775,7 @@ function drawGraph() {
     // endpoints on circle borders
     const x1 = a.x + ux * a.r, y1 = a.y + uy * a.r;
     const x2 = b.x - ux * (b.r + 6), y2 = b.y - uy * (b.r + 6);
-    ctx.strokeStyle = `rgba(80,90,100,${Math.min(0.6, 0.2 + e.w * 0.08)})`;
+    ctx.strokeStyle = `rgba(140,160,190,${Math.min(0.85, 0.35 + e.w * 0.12)})`;
     ctx.lineWidth = Math.min(4, 1 + Math.log2(1 + e.w));
     ctx.beginPath();
     ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
@@ -828,22 +788,35 @@ function drawGraph() {
     ctx.lineTo(x2 - ux * ah - uy * ah * 0.5, y2 - uy * ah + ux * ah * 0.5);
     ctx.closePath(); ctx.fill();
   }
-  // nodes — pulsing glow (visual life, not motion)
-  const now = performance.now() / 1000;
+  // nodes — radial-gradient halo + core, both pulsing; fade in on spawn.
+  const nowMs = performance.now();
+  const now = nowMs / 1000;
+  const fade = Math.min(1, (nowMs - graph.t0) / 600);
   for (const n of graph.nodes) {
-    const pulse = 0.5 + 0.5 * Math.sin(now * 2 + n.calls);   // 0..1
-    const r = n.r * (1 + pulse * 0.06);                       // subtle size breath
+    const pulse = 0.5 + 0.5 * Math.sin(now * 2.2 + n.calls);   // 0..1
+    const r = n.r * (1 + pulse * 0.18);                         // visible size breath
+    const haloR = r + 14 + pulse * 26;                          // wide glow
     ctx.save();
-    ctx.shadowBlur = 10 + pulse * 14;
+    // halo: radial gradient colour -> transparent (reads strong on dark bg)
+    const grad = ctx.createRadialGradient(n.x, n.y, r * 0.4, n.x, n.y, haloR);
+    grad.addColorStop(0, n.color);
+    grad.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.globalAlpha = (0.35 + pulse * 0.45) * fade * (graph.hover === n ? 1.3 : 1);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, haloR, 0, Math.PI * 2);
+    ctx.fill();
+    // core
+    ctx.globalAlpha = fade * (graph.hover === n ? 1 : 0.95);
+    ctx.shadowBlur = 18 + pulse * 26;
     ctx.shadowColor = n.color;
     ctx.beginPath();
     ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
     ctx.fillStyle = n.color;
-    ctx.globalAlpha = graph.hover === n ? 1 : 0.85;
     ctx.fill();
     ctx.restore();
     ctx.globalAlpha = 1;
-    ctx.lineWidth = graph.hover === n ? 2 : 1;
+    ctx.lineWidth = graph.hover === n ? 2.5 : 1.5;
     ctx.strokeStyle = "#fff"; ctx.stroke();
   }
   // labels beside node with leader line, truncated
@@ -852,7 +825,7 @@ function drawGraph() {
     const lx = n.x + Math.cos(ang) * (n.r + 6);
     const ly = n.y + Math.sin(ang) * (n.r + 6);
     // leader line
-    ctx.strokeStyle = "#bbb"; ctx.lineWidth = 1;
+    ctx.strokeStyle = "#5a6478"; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(n.x + Math.cos(ang) * n.r, n.y + Math.sin(ang) * n.r);
     ctx.lineTo(lx, ly); ctx.stroke();
     // label (right of point if ang points right-ish, else left)
@@ -863,9 +836,9 @@ function drawGraph() {
     const tw = ctx.measureText(label).width;
     const right = Math.cos(ang) >= 0;
     const tx = right ? lx + 3 : lx - tw - 3;
-    ctx.fillStyle = "#1a1a1a";
+    ctx.fillStyle = "#e8ecf5";
     ctx.fillText(label, tx, ly + 4);
-    ctx.fillStyle = "#999"; ctx.font = "9px sans-serif";
+    ctx.fillStyle = "#8a93a8"; ctx.font = "9px sans-serif";
     ctx.fillText(`${n.calls}`, right ? tx : tx, ly + 14);
   }
 }
