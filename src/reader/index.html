@@ -13,22 +13,28 @@
         <label>session
           <select id="session"></select>
         </label>
-        <label>filter
-          <input id="filter" type="search" placeholder="host / status / method" />
-        </label>
         <label><input id="live" type="checkbox" checked /> live</label>
         <label><input id="show-assets" type="checkbox" /> assets</label>
         <button id="export-btn" title="download the current session as a .jsonl file">export</button>
         <label class="import-label">import
           <input id="import-file" type="file" accept=".jsonl,application/x-ndjson,text/plain" hidden />
         </label>
-        <button id="catalogue-btn" title="dump endpoint catalogue to console">catalogue</button>
-        <button id="auth-btn" title="dump auth snapshot to console">auth</button>
       </div>
     </header>
     <main>
       <section id="pages" class="pane">
         <h2>Pages <span id="page-count"></span> <button id="collapse-all-btn" class="mini-btn" title="collapse/expand all page groups">collapse all</button></h2>
+        <div id="filter-bar" class="filter-bar">
+          <span class="filter-label">show:</span>
+          <button class="chip" data-f="GET">GET</button>
+          <button class="chip" data-f="POST">POST</button>
+          <button class="chip" data-f="PUT">PUT</button>
+          <button class="chip" data-f="DELETE">DELETE</button>
+          <button class="chip" data-f="PATCH">PATCH</button>
+          <button class="chip" data-f="WS">WS</button>
+          <button class="chip" data-f="UI">UI</button>
+          <button class="chip chip-clear" data-f="" title="clear filters">all</button>
+        </div>
         <div id="page-list"></div>
       </section>
       <div class="divider" id="divider-1" title="drag to resize"></div>

@@ -79,6 +79,14 @@ jq 'select(.kind=="http" and .data.status>=400)' logs/session-*.jsonl
 See `.env.example`. Key knobs: `CDP_HOST`/`CDP_PORT`, `LOG_DIR`,
 `READER_PORT`, `MAX_BODY_BYTES` (0 = no limit).
 
+## Docs
+
+- [`docs/agent-review.md`](docs/agent-review.md) — how to read & diagnose a
+  session log: the event envelope, per-kind payloads, a diagnosis workflow
+  (catalogue → auth → pages → attribute calls to actions → replay), the
+  easy-to-misread gotchas, and `jq` recipes. Read this before reviewing a
+  capture.
+
 ## Limitations / known gaps (v1)
 
 - **Attach only** — Logger connects to an already-running debug Chrome; it does

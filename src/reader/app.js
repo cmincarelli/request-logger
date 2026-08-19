@@ -18,7 +18,7 @@ const state = {
   events: [],
   selected: null,          // seq of the selected event
   renderedSeqs: new Set(), // seqs already in the DOM
-  filter: "",             // free-text substring filter (flat mode)
+  filters: new Set(),      // active method/ui chips (e.g. {"GET","UI"}); empty = all
   nearBottom: true,
   groups: [],             // page groups in DOM order
   currentGroup: null,
@@ -58,6 +58,8 @@ function reset() {
   state.groups = [];
   state.currentGroup = null;
   state.allCollapsed = false;
+  state.filters = new Set();
+  updateChips();
   $("collapse-all-btn").textContent = "collapse all";
   $("page-list").innerHTML = "";
   $("inspector-body").innerHTML = '<p class="hint">select a request to inspect</p>';
@@ -122,8 +124,16 @@ function visible(evt) {
   return true;
 }
 
-function filteredMode() {
-  return Boolean(state.filter);
+// Which chip bucket an event falls into for the method/ui filter.
+function filterBucket(evt) {
+  if (evt.kind === "http") return evt.data.method;
+  if (evt.kind === "ws") return "WS";
+  return "UI";
+}
+// True when the event passes the active chip filters (empty set = show all).
+function matchesFilters(evt) {
+  if (state.filters.size === 0) return true;
+  return state.filters.has(filterBucket(evt));
 }
 
 function appendEvent(evt) {
@@ -149,8 +159,8 @@ function appendEvent(evt) {
     return; // the boundary event is the header, not a child row
   }
   if (!visible(evt)) return;
-  // when a filter is active, only render children that match the filter
-  if (state.filter && !matchesFilter(evt)) return;
+  // when method/ui filters are active, only render matching children
+  if (!matchesFilters(evt)) return;
   ensureGroup();
   appendChildRow(evt);
 }
@@ -230,9 +240,8 @@ function label(evt) {
 }
 
 function matchesFilter(evt) {
-  const f = state.filter;
-  if (!f) return true;
-  return summary(evt).toLowerCase().includes(f);
+  // kept for filter-bar; currently unused after switch to chips
+  return matchesFilters(evt);
 }
 
 // full rebuild (filter change / assets toggle / reset)
@@ -254,24 +263,41 @@ function rebuild() {
         continue;
       }
       openGroup(boundary.url, boundary.status, boundary.kind);
-    } else if (visible(evt) && (!state.filter || matchesFilter(evt))) {
+    } else if (visible(evt) && matchesFilters(evt)) {
       ensureGroup();
       appendChildRow(evt);
     }
   }
-  // when filtering, drop page groups whose URL doesn't match AND have no children
-  if (state.filter) {
+  // when filtering, drop page groups with no surviving children
+  if (state.filters.size > 0) {
     for (const g of state.groups) {
-      const urlMatch = (g.url || "").toLowerCase().includes(state.filter);
-      if (!urlMatch && g.count === 0) g.groupEl.remove();
+      if (g.count === 0) g.groupEl.remove();
     }
   }
   $("page-count").textContent = `(${state.groups.length} pages, ${state.events.length} events)`;
 }
 
-$("filter").addEventListener("input", (e) => {
-  state.filter = e.target.value.toLowerCase();
-  rebuild();
+// method/ui chip filters in the pages panel
+function updateChips() {
+  for (const chip of document.querySelectorAll(".chip")) {
+    const f = chip.dataset.f;
+    const active = f === "" ? state.filters.size === 0 : state.filters.has(f);
+    chip.classList.toggle("active", active);
+  }
+}
+document.querySelectorAll(".chip").forEach((chip) => {
+  chip.addEventListener("click", () => {
+    const f = chip.dataset.f;
+    if (f === "") {
+      state.filters = new Set();
+    } else if (state.filters.has(f)) {
+      state.filters.delete(f);
+    } else {
+      state.filters.add(f);
+    }
+    updateChips();
+    rebuild();
+  });
 });
 
 $("show-assets").addEventListener("change", (e) => {
@@ -500,16 +526,6 @@ function toCurl(h) {
   return parts.join(" \\\n  ");
 }
 function quote(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
-
-// ─── catalogue / auth (console dumps) ────────────────────────────────
-$("catalogue-btn").onclick = async () => {
-  const r = await fetch(`/api/sessions/${state.sessionId}/catalogue`).then((r) => r.json());
-  console.table(r.data.catalogue.map((g) => ({ method: g.method, endpoint: g.origin + g.template, count: g.count, statuses: JSON.stringify(g.statuses) })));
-};
-$("auth-btn").onclick = async () => {
-  const r = await fetch(`/api/sessions/${state.sessionId}/auth`).then((r) => r.json());
-  console.log("auth snapshot", r.data.auth);
-};
 
 // ─── export / import session logs ────────────────────────────────────
 // Sessions are plain JSONL; export downloads the current one, import uploads

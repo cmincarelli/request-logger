@@ -50,6 +50,22 @@ main { display: flex; flex: 1; min-height: 0; }
 }
 .pane h2 span { color: #aaa; font-weight: normal; }
 #page-list, #inspector-body { overflow: auto; flex: 1; min-width: 0; }
+.filter-bar {
+  display: flex; align-items: center; gap: 4px;
+  padding: 6px 10px;          /* horizontal matches h2 (10px); vertical gives breathing room */
+  border-bottom: 1px solid #eee; background: #fafbfc; flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.filter-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: #888; margin-right: 4px; }
+.chip {
+  font: inherit; font-size: 10px; font-weight: 600;
+  padding: 2px 7px; border: 1px solid #ccc; background: #fff; border-radius: 10px;
+  cursor: pointer; color: #555;
+}
+.chip:hover { background: #eef; border-color: #9bb; }
+.chip.active { background: #dfe; border-color: #5a7; color: #246; }
+.chip-clear { color: #888; }
+.chip-clear.active { background: #eee; border-color: #ccc; color: #555; }
 .mini-btn { font-size: 10px; padding: 1px 6px; margin-left: 6px; }
 
 /* ── page groups ───────────────────────────────────────────────────── */
