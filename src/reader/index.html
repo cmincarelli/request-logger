@@ -40,8 +40,20 @@
       </section>
       <div class="divider" id="divider-1" title="drag to resize"></div>
       <section id="inspector" class="pane">
-        <h2>Inspector</h2>
-        <div id="inspector-body"><p class="hint">select a request to inspect</p></div>
+        <nav class="tabs">
+          <button class="tab active" data-tab="inspector">Inspector</button>
+          <button class="tab" data-tab="graph">Domain Graph</button>
+        </nav>
+        <div id="tab-inspector" class="tab-panel active">
+          <div id="inspector-body"><p class="hint">select a request to inspect</p></div>
+        </div>
+        <div id="tab-graph" class="tab-panel">
+          <div class="graph-toolbar">
+            <span class="graph-hint">circles = domains · size = call count · line: caller → callee</span>
+            <button id="graph-replay" class="mini-btn">replay</button>
+          </div>
+          <canvas id="graph-canvas"></canvas>
+        </div>
       </section>
     </main>
     <script src="/app.js"></script>
