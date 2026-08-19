@@ -19,6 +19,8 @@ const state = {
   selected: null,          // seq of the selected event
   renderedSeqs: new Set(), // seqs already in the DOM
   filters: new Set(),      // active method/ui chips (e.g. {"GET","UI"}); empty = all
+  textFilter: "",         // partial host/path substring (lowercased)
+  typeFilter: "",         // resource-type select (Document/Fetch/XHR/Other/WS/UI)
   nearBottom: true,
   groups: [],             // page groups in DOM order
   currentGroup: null,
@@ -61,7 +63,10 @@ function reset() {
   state.seqToGroup = new Map();
   state.allCollapsed = false;
   state.filters = new Set();
+  state.textFilter = "";
+  state.typeFilter = "";
   updateChips();
+  syncFilterInputs();
   $("collapse-all-btn").textContent = "collapse all";
   $("page-list").innerHTML = "";
   $("inspector-body").innerHTML = '<p class="hint">select a request to inspect</p>';
@@ -137,10 +142,33 @@ function filterBucket(evt) {
   if (evt.kind === "ws") return "WS";
   return "UI";
 }
-// True when the event passes the active chip filters (empty set = show all).
+// partial text match on host/path/search of an http/ws URL (case-insensitive)
+function matchesText(evt) {
+  if (!state.textFilter) return true;
+  const t = state.textFilter;
+  if (evt.kind === "http" || evt.kind === "ws") {
+    return (evt.data.url || "").toLowerCase().includes(t);
+  }
+  // UI events: match the page url in meta, or target text
+  const u = evt.data.meta?.url || "";
+  const txt = evt.data.target?.text || evt.data.target?.css || "";
+  return u.toLowerCase().includes(t) || txt.toLowerCase().includes(t);
+}
+// resource-type select (Document/Fetch/XHR/Other/WS/UI)
+function matchesType(evt) {
+  if (!state.typeFilter) return true;
+  const tf = state.typeFilter;
+  if (tf === "UI") return evt.kind === "ui";
+  if (tf === "WS") return evt.kind === "ws";
+  // http resourceType match
+  return evt.kind === "http" && evt.data.resourceType === tf;
+}
+// True when the event passes all active filters (chips + text + type).
 function matchesFilters(evt) {
-  if (state.filters.size === 0) return true;
-  return state.filters.has(filterBucket(evt));
+  if (state.filters.size !== 0 && !state.filters.has(filterBucket(evt))) return false;
+  if (!matchesText(evt)) return false;
+  if (!matchesType(evt)) return false;
+  return true;
 }
 
 function appendEvent(evt) {
@@ -314,6 +342,21 @@ $("show-assets").addEventListener("change", (e) => {
   state.showAssets = e.target.checked;
   rebuild();
 });
+
+$("text-filter").addEventListener("input", (e) => {
+  state.textFilter = e.target.value.toLowerCase().trim();
+  rebuild();
+});
+$("type-filter").addEventListener("change", (e) => {
+  state.typeFilter = e.target.value;
+  rebuild();
+});
+
+// keep the filter inputs in sync with state across reset()/import
+function syncFilterInputs() {
+  $("text-filter").value = state.textFilter || "";
+  $("type-filter").value = state.typeFilter || "";
+}
 
 $("collapse-all-btn").addEventListener("click", () => {
   state.allCollapsed = !state.allCollapsed;
@@ -660,8 +703,22 @@ function initGraph() {
     const mx = e.clientX - r.left, my = e.clientY - r.top;
     graph.hover = graph.nodes.find((n) => Math.hypot(n.x - mx, n.y - my) <= n.r + 4) || null;
     graph.canvas.style.cursor = graph.hover ? "pointer" : "default";
-    // tooltip via title attribute on the canvas
-    graph.canvas.title = graph.hover ? `${graph.hover.host}\n${graph.hover.calls} calls` : "";
+    graph.canvas.title = graph.hover ? `${graph.hover.host}\n${graph.hover.calls} calls — click to filter pages` : "";
+  });
+  // click a node -> filter the pages list to that domain
+  graph.canvas.addEventListener("click", (e) => {
+    const r = graph.canvas.getBoundingClientRect();
+    const mx = e.clientX - r.left, my = e.clientY - r.top;
+    const hit = graph.nodes.find((n) => Math.hypot(n.x - mx, n.y - my) <= n.r + 4);
+    if (!hit) return;
+    // toggle: if already filtering to this host, clear it instead
+    if (state.textFilter === hit.host.toLowerCase()) {
+      state.textFilter = "";
+    } else {
+      state.textFilter = hit.host.toLowerCase();
+    }
+    $("text-filter").value = state.textFilter;
+    rebuild();
   });
 }
 
