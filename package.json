@@ -5,9 +5,10 @@
   "type": "module",
   "description": "Attach to a real Chrome over CDP, capture network + user events to JSONL, and explore the APIs that drive a site.",
   "scripts": {
-    "start": "tsx src/capture.ts",
+    "start": "tsx src/main.ts",
+    "capture": "tsx src/capture.ts",
     "server": "tsx src/server.ts",
-    "dev": "tsx watch src/capture.ts",
+    "dev": "tsx watch src/main.ts",
     "typecheck": "tsc --noEmit",
     "chrome": "bash scripts/chrome-debug.sh"
   },

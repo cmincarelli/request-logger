@@ -99,7 +99,7 @@ app.get<{ Params: { id: string } }>("/api/sessions/:id/auth", async (req, reply)
   return { ok: true, data: { auth: Object.fromEntries(auth) } };
 });
 
-function templatePath(pathname: string): string {
+export function templatePath(pathname: string): string {
   return pathname
     .split("/")
     .map((seg) => {
@@ -113,14 +113,25 @@ function templatePath(pathname: string): string {
     .join("/");
 }
 
-const start = async () => {
-  try {
-    await app.listen({ host: config.readerHost, port: config.readerPort });
-    console.log(`[reader] http://${config.readerHost}:${config.readerPort}`);
-    console.log(`[reader] logs: ${resolve(config.logDir)}`);
-  } catch (err) {
+export async function startServer(): Promise<{ close: () => Promise<void> }> {
+  await app.listen({ host: config.readerHost, port: config.readerPort });
+  console.log(`[reader] http://${config.readerHost}:${config.readerPort}`);
+  console.log(`[reader] logs: ${resolve(config.logDir)}`);
+  return {
+    async close() {
+      await app.close();
+    },
+  };
+}
+
+// Run standalone when invoked directly (npm run server).
+const isMain = (() => {
+  if (!process.argv[1]) return false;
+  return fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+})();
+if (isMain) {
+  startServer().catch((err) => {
     console.error("[reader] failed to start:", err);
     process.exit(1);
-  }
-};
-void start();
+  });
+}
