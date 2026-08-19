@@ -1,17 +1,29 @@
-// Logger reader UI. Polls the active session for new events, renders a stable
-// append-only timeline, an endpoint explorer, and a per-call inspector with
-// curl export.
+// Logger reader UI. Page-grouped view: each page navigation is a collapsible
+// header; the API calls + UI actions that happened on that page are listed
+// beneath it in order. Inspector shows the selected request/response + curl.
 
 const $ = (id) => document.getElementById(id);
+
+// Resource types that are static assets — hidden from page groups by default
+// (toggle with the "assets" checkbox). API calls (Fetch/XHR/Other), WebSocket
+// frames, and UI actions are always shown.
+const ASSET_TYPES = new Set([
+  "Script", "Stylesheet", "Image", "Font", "Manifest", "Media",
+  "Prefetch", "Favicon", "CSPViolationReport", "Ping",
+]);
+
 const state = {
   sessionId: null,
   lastSeq: 0,
   events: [],
-  selected: null,         // seq of the selected event
+  selected: null,          // seq of the selected event
   renderedSeqs: new Set(), // seqs already in the DOM
-  filter: "",            // free-text substring filter
-  endpointFilter: null,   // {method, origin, template} | null
+  filter: "",             // free-text substring filter (flat mode)
   nearBottom: true,
+  groups: [],             // page groups in DOM order
+  currentGroup: null,
+  allCollapsed: false,
+  showAssets: false,
 };
 
 // ─── session picker ───────────────────────────────────────────────────
@@ -43,17 +55,14 @@ function reset() {
   state.selected = null;
   state.renderedSeqs = new Set();
   state.nearBottom = true;
-  state.endpointFilter = null;
-  $("event-list").innerHTML = "";
-  $("endpoint-list").innerHTML = "";
+  state.groups = [];
+  state.currentGroup = null;
+  state.allCollapsed = false;
+  $("collapse-all-btn").textContent = "collapse all";
+  $("page-list").innerHTML = "";
   $("inspector-body").innerHTML = '<p class="hint">select a request to inspect</p>';
-  $("event-count").textContent = "";
-  $("endpoint-count").textContent = "";
+  $("page-count").textContent = "";
   poll();
-  // Also immediately render whatever state we have (covers the case where the
-  // first poll hasn't returned yet but events already exist).
-  renderEndpoints();
-  $("event-count").textContent = `(${state.events.length})`;
 }
 
 let pollTimer = null;
@@ -68,43 +77,133 @@ async function poll() {
       state.events.push(...r.data.events);
       state.lastSeq = r.data.lastSeq;
       for (const evt of r.data.events) appendEvent(evt);
-      // auto-select the first http event so the inspector isn't empty
       if (wasEmpty && state.selected == null) {
         const firstHttp = state.events.find((e) => e.kind === "http");
         if (firstHttp) selectBySeq(firstHttp.seq);
       }
-      if (state.nearBottom) $("event-list").scrollTop = $("event-list").scrollHeight;
+      if (state.nearBottom) $("page-list").scrollTop = $("page-list").scrollHeight;
     }
-    // Always reflect current state — a poll with 0 new events still needs
-    // the endpoint list + counts to render (e.g. right after a session switch
-    // whose events all arrived in an earlier poll, or a reload).
-    renderEndpoints();
-    $("event-count").textContent = `(${state.events.length})`;
+    $("page-count").textContent = `(${state.groups.length} pages, ${state.events.length} events)`;
   } catch (e) {
     /* ignore transient */
   }
-  if ($("live").checked) {
-    pollTimer = setTimeout(poll, 1000);
-  }
+  if ($("live").checked) pollTimer = setTimeout(poll, 1000);
 }
 $("live").addEventListener("change", () => {
   if (pollTimer) clearTimeout(pollTimer);
   if ($("live").checked) poll();
 });
 
-// track scroll so we only auto-stick to bottom when the user is already there
-$("event-list").addEventListener("scroll", () => {
-  const el = $("event-list");
+$("page-list").addEventListener("scroll", () => {
+  const el = $("page-list");
   state.nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
 });
 
-// ─── timeline (append-only) ───────────────────────────────────────────
+// ─── page grouping ───────────────────────────────────────────────────
+// A navigation boundary opens a new page group:
+//   • http Document request  → the page itself (provides status)
+//   • ui install/popstate/hashchange → SPA / fallback navigation marker
+// Consecutive boundaries for the same visit merge (e.g. an install UI event
+// followed by that page's Document request) instead of opening two groups.
+const BOUNDARY_UI = new Set(["install", "popstate", "hashchange"]);
+
+function pageBoundary(evt) {
+  if (evt.kind === "ui" && BOUNDARY_UI.has(evt.data.type))
+    return { url: evt.data.meta?.url || "", status: null, kind: "ui" };
+  if (evt.kind === "http" && evt.data.resourceType === "Document")
+    return { url: evt.data.url, status: evt.data.status, kind: "document" };
+  return null;
+}
+
+function visible(evt) {
+  // hide static assets unless the toggle is on
+  if (!state.showAssets && evt.kind === "http" && ASSET_TYPES.has(evt.data.resourceType))
+    return false;
+  return true;
+}
+
+function filteredMode() {
+  return Boolean(state.filter);
+}
+
 function appendEvent(evt) {
   if (state.renderedSeqs.has(evt.seq)) return;
   state.renderedSeqs.add(evt.seq);
-  if (!matchesFilter(evt)) return;
+
+  if (filteredMode()) {
+    if (matchesFilter(evt) && visible(evt)) $("page-list").appendChild(buildRow(evt));
+    return;
+  }
+
+  const boundary = pageBoundary(evt);
+  if (boundary) {
+    // merge: a Document fills in the status of a pending UI-marker group for the same url
+    if (
+      boundary.kind === "document" &&
+      state.currentGroup &&
+      state.currentGroup.createdBy === "ui" &&
+      state.currentGroup.url === boundary.url
+    ) {
+      state.currentGroup.status = boundary.status;
+      state.currentGroup.createdBy = "document";
+      if (state.currentGroup.statusEl) state.currentGroup.statusEl.textContent = boundary.status;
+      return;
+    }
+    openGroup(boundary.url, boundary.status, boundary.kind);
+    return; // the boundary event is the header, not a child row
+  }
+  if (!visible(evt)) return;
+  ensureGroup();
+  appendChildRow(evt);
+}
+
+function ensureGroup() {
+  if (!state.currentGroup) openGroup("(session start)", null, "start");
+}
+
+function openGroup(url, status, createdBy) {
+  const groupEl = document.createElement("div");
+  groupEl.className = "page-group";
+  const headerEl = document.createElement("div");
+  headerEl.className = "page-group-header";
+  const caret = document.createElement("span");
+  caret.className = "pg-caret";
+  caret.textContent = state.allCollapsed ? "▸" : "▾";
+  const badge = document.createElement("span");
+  badge.className = "pg-badge";
+  badge.textContent = "PAGE";
+  const urlEl = document.createElement("span");
+  urlEl.className = "pg-url";
+  urlEl.textContent = shortUrl(url || "");
+  urlEl.title = url || "";
+  const statusEl = document.createElement("span");
+  statusEl.className = "pg-status";
+  statusEl.textContent = status != null ? status : "";
+  const countEl = document.createElement("span");
+  countEl.className = "pg-count";
+  countEl.textContent = "0";
+  headerEl.append(caret, badge, urlEl, statusEl, countEl);
+  const body = document.createElement("div");
+  body.className = "page-group-body";
+  if (state.allCollapsed) body.style.display = "none";
+  headerEl.onclick = () => {
+    const collapsed = body.style.display === "none";
+    body.style.display = collapsed ? "" : "none";
+    caret.textContent = collapsed ? "▾" : "▸";
+  };
+  groupEl.append(headerEl, body);
+  $("page-list").appendChild(groupEl);
+  const g = { url, status, createdBy, count: 0, groupEl, headerEl, body, caret, countEl, statusEl };
+  state.groups.push(g);
+  state.currentGroup = g;
+}
+
+function appendChildRow(evt) {
   const row = buildRow(evt);
-  $("event-list").appendChild(row);
+  state.currentGroup.body.appendChild(row);
+  state.currentGroup.count++;
+  state.currentGroup.countEl.textContent = `${state.currentGroup.count}`;
+  if (state.allCollapsed) state.currentGroup.body.style.display = "none";
 }
 
 function buildRow(evt) {
@@ -116,7 +215,7 @@ function buildRow(evt) {
   t.textContent = new Date(evt.t).toLocaleTimeString();
   const kind = document.createElement("span");
   kind.className = "ev-kind";
-  kind.textContent = evt.kind.toUpperCase();
+  kind.textContent = label(evt);
   const text = document.createElement("span");
   text.className = "ev-text";
   text.textContent = summary(evt);
@@ -126,43 +225,80 @@ function buildRow(evt) {
   return row;
 }
 
+function label(evt) {
+  if (evt.kind === "http") return evt.data.method;
+  if (evt.kind === "ws") return "WS";
+  return "UI";
+}
+
 function matchesFilter(evt) {
-  // structured endpoint filter takes precedence (set by clicking an endpoint)
-  if (state.endpointFilter) {
-    const f = state.endpointFilter;
-    if (evt.kind !== "http") return false;
-    let p;
-    try { p = new URL(evt.data.url); } catch { return false; }
-    return evt.data.method === f.method && p.origin === f.origin && templatePath(p.pathname) === f.template;
-  }
   const f = state.filter;
   if (!f) return true;
   return summary(evt).toLowerCase().includes(f);
 }
 
-// full rebuild (used on filter change / session reset)
-function rebuildTimeline() {
-  const list = $("event-list");
+// full rebuild (filter change / assets toggle / reset)
+function rebuild() {
+  const list = $("page-list");
   list.innerHTML = "";
-  const frag = document.createDocumentFragment();
-  for (const evt of state.events) {
-    if (!matchesFilter(evt)) continue;
-    frag.appendChild(buildRow(evt));
+  state.groups = [];
+  state.currentGroup = null;
+  if (filteredMode()) {
+    const frag = document.createDocumentFragment();
+    for (const evt of state.events) {
+      if (!matchesFilter(evt) || !visible(evt)) continue;
+      frag.appendChild(buildRow(evt));
+    }
+    list.appendChild(frag);
+  } else {
+    for (const evt of state.events) {
+      const boundary = pageBoundary(evt);
+      if (boundary) {
+        if (
+          boundary.kind === "document" &&
+          state.currentGroup &&
+          state.currentGroup.createdBy === "ui" &&
+          state.currentGroup.url === boundary.url
+        ) {
+          state.currentGroup.status = boundary.status;
+          state.currentGroup.createdBy = "document";
+          state.currentGroup.statusEl.textContent = boundary.status;
+          continue;
+        }
+        openGroup(boundary.url, boundary.status, boundary.kind);
+      } else if (visible(evt)) {
+        ensureGroup();
+        appendChildRow(evt);
+      }
+    }
   }
-  list.appendChild(frag);
-  $("event-count").textContent = `(${state.events.length})`;
+  $("page-count").textContent = `(${state.groups.length} pages, ${state.events.length} events)`;
 }
 
 $("filter").addEventListener("input", (e) => {
   state.filter = e.target.value.toLowerCase();
-  state.endpointFilter = null; // typing clears the structured filter
-  rebuildTimeline();
+  rebuild();
 });
 
+$("show-assets").addEventListener("change", (e) => {
+  state.showAssets = e.target.checked;
+  rebuild();
+});
+
+$("collapse-all-btn").addEventListener("click", () => {
+  state.allCollapsed = !state.allCollapsed;
+  $("collapse-all-btn").textContent = state.allCollapsed ? "expand all" : "collapse all";
+  for (const g of state.groups) {
+    g.body.style.display = state.allCollapsed ? "none" : "";
+    g.caret.textContent = state.allCollapsed ? "▸" : "▾";
+  }
+});
+
+// ─── summaries ────────────────────────────────────────────────────────
 function summary(evt) {
   if (evt.kind === "http") {
     const h = evt.data;
-    return `${h.method} ${shortUrl(h.url)} → ${h.status}${h.failed ? " FAIL" : ""}`;
+    return `${shortUrl(h.url)} → ${h.status}${h.failed ? " FAIL" : ""}`;
   }
   if (evt.kind === "ws") {
     const w = evt.data;
@@ -189,76 +325,6 @@ function preview(s) {
   return t.length < String(s).length ? t + "…" : t;
 }
 
-// ─── endpoints ────────────────────────────────────────────────────────
-function renderEndpoints() {
-  if (!state.events.length) return;
-  const groups = new Map();
-  for (const evt of state.events) {
-    if (evt.kind !== "http") continue;
-    const h = evt.data;
-    let p;
-    try {
-      p = new URL(h.url);
-    } catch {
-      continue;
-    }
-    const tpl = templatePath(p.pathname);
-    const key = `${h.method} ${p.origin}${tpl}`;
-    let g = groups.get(key);
-    if (!g) {
-      g = { method: h.method, origin: p.origin, tpl, count: 0, statuses: {}, sampleSeq: evt.seq };
-      groups.set(key, g);
-    }
-    g.count++;
-    g.statuses[h.status] = (g.statuses[h.status] || 0) + 1;
-    g.sampleSeq = evt.seq; // keep the most recent call as the sample
-  }
-  const sorted = [...groups.values()].sort((a, b) => b.count - a.count);
-  const list = $("endpoint-list");
-  list.innerHTML = "";
-  for (const g of sorted) {
-    const row = document.createElement("div");
-    row.className = "endpoint";
-    const m = document.createElement("div");
-    m.className = `ep-method m-${g.method}`;
-    m.textContent = g.method;
-    const path = document.createElement("div");
-    path.className = "ep-path";
-    path.textContent = g.origin + g.tpl;
-    const meta = document.createElement("div");
-    meta.className = "ep-meta";
-    meta.textContent = `${g.count}×  ${Object.keys(g.statuses)
-      .map((s) => `${s}(${g.statuses[s]})`)
-      .join(" ")}`;
-    row.append(m, path, meta);
-    row.onclick = () => {
-      state.endpointFilter = { method: g.method, origin: g.origin, template: g.tpl };
-      state.filter = "";
-      $("filter").value = `${g.method} ${g.origin}${g.tpl}`;
-      rebuildTimeline();
-      // drive the inspector to the most recent call for this endpoint
-      selectBySeq(g.sampleSeq);
-      const row2 = $("event-list").querySelector(`.event[data-seq="${g.sampleSeq}"]`);
-      if (row2) row2.scrollIntoView({ block: "nearest" });
-    };
-    list.appendChild(row);
-  }
-  $("endpoint-count").textContent = `(${sorted.length})`;
-}
-
-function templatePath(pathname) {
-  return pathname
-    .split("/")
-    .map((seg) => {
-      if (seg === "") return "";
-      if (/^\d+$/.test(seg)) return ":id";
-      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(seg)) return ":uuid";
-      if (/^[0-9a-f]{16,}$/i.test(seg)) return ":hex";
-      return seg;
-    })
-    .join("/");
-}
-
 // ─── inspector ─────────────────────────────────────────────────────────
 function selectBySeq(seq) {
   const evt = state.events.find((e) => e.seq === seq);
@@ -267,19 +333,16 @@ function selectBySeq(seq) {
   renderInspector(evt);
   highlightRow(seq);
 }
-
 function highlightRow(seq) {
   document.querySelectorAll(".event.selected").forEach((e) => e.classList.remove("selected"));
-  const row = $("event-list").querySelector(`.event[data-seq="${seq}"]`);
+  const row = $("page-list").querySelector(`.event[data-seq="${seq}"]`);
   if (row) row.classList.add("selected");
 }
-
 function selectEvent(evt, row) {
   state.selected = evt.seq;
   renderInspector(evt);
   highlightRow(evt.seq);
 }
-
 function renderInspector(evt) {
   const body = $("inspector-body");
   body.innerHTML = "";
@@ -303,12 +366,7 @@ function renderHttpInspector(evt, body) {
       ? prettySection("Response body", h.responseBody, h.responseBodyTruncated, h.responseBodyBase64)
       : placeholder("Response body", h.status === 0 ? "no response" : "none")
   );
-  body.appendChild(
-    section(
-      "Meta",
-      `status ${h.status} ${h.statusText}  ${h.resourceType}  ${h.durationMs || 0}ms`
-    )
-  );
+  body.appendChild(section("Meta", `status ${h.status} ${h.statusText}  ${h.resourceType}  ${h.durationMs || 0}ms`));
   const btn = document.createElement("button");
   btn.className = "copy";
   btn.textContent = "copy curl";
@@ -319,17 +377,11 @@ function renderHttpInspector(evt, body) {
   pre.textContent = toCurl(h);
   body.appendChild(pre);
 }
-
 function renderWsInspector(evt, body) {
   const w = evt.data;
   body.appendChild(section("WebSocket", `${w.direction} ${w.url} (opcode ${w.opcode})`));
-  body.appendChild(
-    w.payload
-      ? prettySection("Payload", w.payload, w.payloadTruncated, w.base64)
-      : placeholder("Payload", "empty")
-  );
+  body.appendChild(w.payload ? prettySection("Payload", w.payload, w.payloadTruncated, w.base64) : placeholder("Payload", "empty"));
 }
-
 function renderUiInspector(evt, body) {
   const u = evt.data;
   body.appendChild(section("UI event", u.type));
@@ -358,9 +410,7 @@ function kvSection(title, obj) {
   h.textContent = title;
   const pre = document.createElement("pre");
   const entries = Object.entries(obj);
-  pre.textContent = entries.length
-    ? entries.map(([k, v]) => `${k}: ${v}`).join("\n")
-    : "— none —";
+  pre.textContent = entries.length ? entries.map(([k, v]) => `${k}: ${v}`).join("\n") : "— none —";
   d.append(h, pre);
   return d;
 }
@@ -375,89 +425,58 @@ function prettySection(title, body, truncated, base64) {
   return d;
 }
 function tryPretty(s) {
-  try {
-    return JSON.stringify(JSON.parse(s), null, 2);
-  } catch {
-    return s;
-  }
+  try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return s; }
 }
 function esc(s) {
   return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 }
-
 function toCurl(h) {
   const parts = [`curl -X ${h.method}`];
-  for (const [k, v] of Object.entries(h.requestHeaders))
-    parts.push(`-H ${quote(`${k}: ${v}`)}`);
+  for (const [k, v] of Object.entries(h.requestHeaders)) parts.push(`-H ${quote(`${k}: ${v}`)}`);
   if (h.requestBody != null) parts.push(`--data ${quote(h.requestBody)}`);
   parts.push(quote(h.url));
   return parts.join(" \\\n  ");
 }
-function quote(s) {
-  return "'" + String(s).replace(/'/g, "'\\''") + "'";
-}
+function quote(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
 
-// ─── catalogue / auth buttons ─────────────────────────────────────────
+// ─── catalogue / auth (console dumps) ────────────────────────────────
 $("catalogue-btn").onclick = async () => {
   const r = await fetch(`/api/sessions/${state.sessionId}/catalogue`).then((r) => r.json());
-  console.log("catalogue", r.data.catalogue);
-  alert(`${r.data.catalogue.length} endpoints — logged to browser console`);
+  console.table(r.data.catalogue.map((g) => ({ method: g.method, endpoint: g.origin + g.template, count: g.count, statuses: JSON.stringify(g.statuses) })));
 };
 $("auth-btn").onclick = async () => {
   const r = await fetch(`/api/sessions/${state.sessionId}/auth`).then((r) => r.json());
   console.log("auth snapshot", r.data.auth);
-  alert("Auth snapshot logged to browser console");
 };
 
-// ─── resizable columns ──────────────────────────────────────────────
-// Drag the dividers between panes; widths persist in localStorage.
+// ─── resizable divider ────────────────────────────────────────────────
 function setupDividers() {
-  const main = document.querySelector("main");
-  const endpoints = $("endpoints");
-  const timeline = $("timeline");
-  const MIN = 160;
-
-  // restore saved widths
-  const savedE = localStorage.getItem("logger.w.endpoints");
-  const savedT = localStorage.getItem("logger.w.timeline");
-  if (savedE) setWidth(endpoints, savedE);
-  if (savedT) setWidth(timeline, savedT);
-
-  function setWidth(pane, px) {
-    const clamped = Math.max(MIN, Number(px) || MIN);
-    pane.style.flex = `0 0 ${clamped}px`;
-  }
-
-  function drag(d, leftPane, key) {
-    d.addEventListener("mousedown", (e) => {
-      e.preventDefault();
-      d.classList.add("dragging");
-      document.body.style.cursor = "col-resize";
-      document.body.style.userSelect = "none";
-      const startX = e.clientX;
-      const startW = leftPane.getBoundingClientRect().width;
-      const onMove = (ev) => {
-        const w = Math.max(MIN, startW + (ev.clientX - startX));
-        leftPane.style.flex = `0 0 ${w}px`;
-      };
-      const onUp = () => {
-        d.classList.remove("dragging");
-        document.body.style.cursor = "";
-        document.body.style.userSelect = "";
-        localStorage.setItem(key, leftPane.getBoundingClientRect().width);
-        document.removeEventListener("mousemove", onMove);
-        document.removeEventListener("mouseup", onUp);
-      };
-      document.addEventListener("mousemove", onMove);
-      document.addEventListener("mouseup", onUp);
-    });
-  }
-
-  drag($("divider-1"), endpoints, "logger.w.endpoints");
-  drag($("divider-2"), timeline, "logger.w.timeline");
+  const pages = $("pages");
+  const MIN = 200;
+  const saved = localStorage.getItem("logger.w.pages");
+  if (saved) pages.style.flex = `0 0 ${Math.max(MIN, Number(saved) || MIN)}px`;
+  $("divider-1").addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    $("divider-1").classList.add("dragging");
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const startX = e.clientX;
+    const startW = pages.getBoundingClientRect().width;
+    const onMove = (ev) => { pages.style.flex = `0 0 ${Math.max(MIN, startW + (ev.clientX - startX))}px`; };
+    const onUp = () => {
+      $("divider-1").classList.remove("dragging");
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      localStorage.setItem("logger.w.pages", pages.getBoundingClientRect().width);
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  });
 }
 
-// ─── boot ─────────────────────────────────────────────────────────────
+// ─── boot ────────────────────────────────────────────────────────────
 setupDividers();
 loadSessions();
 poll();

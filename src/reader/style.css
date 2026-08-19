@@ -24,12 +24,12 @@ header h1 { font-size: 16px; margin: 0; }
 button { font: inherit; padding: 3px 8px; border: 1px solid #bbb; background: #fff; border-radius: 4px; cursor: pointer; }
 button:hover { background: #eee; }
 
-/* ── layout: flex row of panes separated by draggable dividers ─────── */
+/* ── layout: two panes + one draggable divider ─────────────────────── */
 main { display: flex; flex: 1; min-height: 0; }
 .pane {
   display: flex;
   flex-direction: column;
-  min-width: 0;          /* allow shrinking so pre/content can't blow out */
+  min-width: 0;
   flex: 1 1 0;
   border-right: 1px solid #ddd;
   overflow: hidden;
@@ -39,7 +39,6 @@ main { display: flex; flex: 1; min-height: 0; }
   flex: 0 0 5px;
   background: #ddd;
   cursor: col-resize;
-  position: relative;
 }
 .divider:hover, .divider.dragging { background: #9aa; }
 .pane h2 {
@@ -48,37 +47,40 @@ main { display: flex; flex: 1; min-height: 0; }
   flex-shrink: 0;
 }
 .pane h2 span { color: #aaa; font-weight: normal; }
-#endpoint-list, #event-list, #inspector-body { overflow: auto; flex: 1; min-width: 0; }
+#page-list, #inspector-body { overflow: auto; flex: 1; min-width: 0; }
+.mini-btn { font-size: 10px; padding: 1px 6px; margin-left: 6px; }
 
-/* ── endpoints ─────────────────────────────────────────────────────── */
-.endpoint {
-  padding: 6px 10px; border-bottom: 1px solid #f0f0f0; cursor: pointer;
-  display: flex; flex-direction: column; gap: 2px;
+/* ── page groups ───────────────────────────────────────────────────── */
+.page-group { border-bottom: 1px solid #e0e0e0; }
+.page-group-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; cursor: pointer; background: #eef1f4;
+  border-top: 1px solid #d8dde3; user-select: none;
 }
-.endpoint:hover { background: #eef; }
-.endpoint .ep-method { font-weight: 600; font-size: 11px; }
-.endpoint .ep-path {
-  font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: #333;
-  overflow-wrap: anywhere;
+.page-group-header:hover { background: #e3e9ef; }
+.page-group-header .pg-caret { width: 12px; color: #667; font-size: 11px; flex-shrink: 0; }
+.page-group-header .pg-badge {
+  font-size: 9px; font-weight: 700; letter-spacing: 0.06em; color: #fff;
+  background: #5a7; padding: 1px 5px; border-radius: 3px; flex-shrink: 0;
 }
-.endpoint .ep-meta { font-size: 10px; color: #999; }
-.m-GET { color: #2a7; }
-.m-POST { color: #c72; }
-.m-PUT { color: #47c; }
-.m-DELETE { color: #c33; }
-.m-PATCH { color: #a3c; }
-.m-WS { color: #777; }
+.page-group-header .pg-url {
+  font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: #1a1a1a;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
+}
+.page-group-header .pg-status { font-size: 11px; color: #888; flex-shrink: 0; }
+.page-group-header .pg-count { font-size: 10px; color: #999; flex-shrink: 0; }
+.page-group-body { }
 
-/* ── timeline ──────────────────────────────────────────────────────── */
+/* ── event rows (children of a page group) ─────────────────────────── */
 .event {
-  padding: 4px 10px; border-bottom: 1px solid #f2f2f2; cursor: pointer;
+  padding: 4px 10px 4px 26px; border-bottom: 1px solid #f2f2f2; cursor: pointer;
   font-family: ui-monospace, Menlo, monospace; font-size: 11px;
   display: flex; gap: 6px; align-items: baseline;
 }
 .event:hover { background: #eef; }
 .event.selected { background: #dfe; }
 .event .ev-t { color: #aaa; white-space: nowrap; flex-shrink: 0; }
-.event .ev-kind { font-weight: 600; width: 28px; flex-shrink: 0; }
+.event .ev-kind { font-weight: 600; width: 26px; flex-shrink: 0; }
 .ev-http { color: #246; }
 .ev-ws { color: #865; }
 .ev-ui { color: #572; }
@@ -86,6 +88,8 @@ main { display: flex; flex: 1; min-height: 0; }
   color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   min-width: 0; flex: 1;
 }
+.m-GET { color: #2a7; } .m-POST { color: #c72; } .m-PUT { color: #47c; }
+.m-DELETE { color: #c33; } .m-PATCH { color: #a3c; }
 
 /* ── inspector ─────────────────────────────────────────────────────── */
 #inspector-body { padding: 10px; font-size: 12px; }
@@ -96,17 +100,9 @@ main { display: flex; flex: 1; min-height: 0; }
   margin: 0; padding: 8px; background: #fff; border: 1px solid #e3e3e3;
   border-radius: 4px; font-family: ui-monospace, Menlo, monospace; font-size: 11px;
   overflow: auto; max-height: 280px;
-  /* wrap long lines (URLs, JWTs, base64) instead of blowing out the column */
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  max-width: 100%;
+  white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; max-width: 100%;
 }
-.kv {
-  font-family: ui-monospace, Menlo, monospace; font-size: 11px;
-  overflow-wrap: anywhere; word-break: break-word;
-}
-.kv .k { color: #888; }
+.kv { font-family: ui-monospace, Menlo, monospace; font-size: 11px; overflow-wrap: anywhere; word-break: break-word; }
 .curl { white-space: pre-wrap; word-break: break-all; }
 button.copy { margin: 4px 0; }
 .ins-empty .hint { font-style: italic; }

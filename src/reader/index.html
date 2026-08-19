@@ -17,24 +17,20 @@
           <input id="filter" type="search" placeholder="host / status / method" />
         </label>
         <label><input id="live" type="checkbox" checked /> live</label>
-        <button id="catalogue-btn">catalogue</button>
-        <button id="auth-btn">auth</button>
+        <label><input id="show-assets" type="checkbox" /> assets</label>
+        <button id="catalogue-btn" title="dump endpoint catalogue to console">catalogue</button>
+        <button id="auth-btn" title="dump auth snapshot to console">auth</button>
       </div>
     </header>
     <main>
-      <section id="endpoints" class="pane">
-        <h2>Endpoints <span id="endpoint-count"></span></h2>
-        <div id="endpoint-list"></div>
+      <section id="pages" class="pane">
+        <h2>Pages <span id="page-count"></span> <button id="collapse-all-btn" class="mini-btn" title="collapse/expand all page groups">collapse all</button></h2>
+        <div id="page-list"></div>
       </section>
       <div class="divider" id="divider-1" title="drag to resize"></div>
-      <section id="timeline" class="pane">
-        <h2>Timeline <span id="event-count"></span></h2>
-        <div id="event-list"></div>
-      </section>
-      <div class="divider" id="divider-2" title="drag to resize"></div>
       <section id="inspector" class="pane">
         <h2>Inspector</h2>
-        <div id="inspector-body"><p class="hint">select an event</p></div>
+        <div id="inspector-body"><p class="hint">select a request to inspect</p></div>
       </section>
     </main>
     <script src="/app.js"></script>
