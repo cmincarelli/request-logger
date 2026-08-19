@@ -57,6 +57,8 @@ function reset() {
   state.nearBottom = true;
   state.groups = [];
   state.currentGroup = null;
+  state.selectedGroup = null;
+  state.seqToGroup = new Map();
   state.allCollapsed = false;
   state.filters = new Set();
   updateChips();
@@ -80,10 +82,15 @@ async function poll() {
       state.lastSeq = r.data.lastSeq;
       for (const evt of r.data.events) appendEvent(evt);
       if (wasEmpty && state.selected == null) {
-        const firstHttp = state.events.find((e) => e.kind === "http");
-        if (firstHttp) selectBySeq(firstHttp.seq);
+        // pick the first real call that belongs to a page group (Document
+        // requests are boundaries, not children, so they have no group)
+        const firstCall = state.events.find((e) => e.kind === "http" && state.seqToGroup.has(e.seq));
+        if (firstCall) selectBySeq(firstCall.seq);
+        else if (state.groups[0]) setSelectedGroup(state.groups[0]);
       }
       if (state.nearBottom) $("page-list").scrollTop = $("page-list").scrollHeight;
+      // refresh the graph if visible
+      if (graphActive()) renderGraph();
     }
     $("page-count").textContent = `(${state.groups.length} pages, ${state.events.length} events)`;
   } catch (e) {
@@ -198,6 +205,7 @@ function openGroup(url, status, createdBy) {
     const collapsed = body.style.display === "none";
     body.style.display = collapsed ? "" : "none";
     caret.textContent = collapsed ? "▾" : "▸";
+    setSelectedGroup(g);
   };
   groupEl.append(headerEl, body);
   $("page-list").appendChild(groupEl);
@@ -211,6 +219,7 @@ function appendChildRow(evt) {
   state.currentGroup.body.appendChild(row);
   state.currentGroup.count++;
   state.currentGroup.countEl.textContent = `${state.currentGroup.count}`;
+  state.seqToGroup.set(evt.seq, state.currentGroup);
   if (state.allCollapsed) state.currentGroup.body.style.display = "none";
 }
 
@@ -250,6 +259,7 @@ function rebuild() {
   list.innerHTML = "";
   state.groups = [];
   state.currentGroup = null;
+  state.seqToGroup = new Map();
   for (const evt of state.events) {
     const boundary = pageBoundary(evt);
     if (boundary) {
@@ -352,6 +362,7 @@ function selectBySeq(seq) {
   state.selected = seq;
   renderInspector(evt);
   highlightRow(seq);
+  setSelectedGroup(state.seqToGroup.get(seq) || null);
 }
 function highlightRow(seq) {
   document.querySelectorAll(".event.selected").forEach((e) => e.classList.remove("selected"));
@@ -362,6 +373,7 @@ function selectEvent(evt, row) {
   state.selected = evt.seq;
   renderInspector(evt);
   highlightRow(evt.seq);
+  setSelectedGroup(state.seqToGroup.get(evt.seq) || null);
 }
 function renderInspector(evt) {
   const body = $("inspector-body");
@@ -607,7 +619,240 @@ function setupDividers() {
   });
 }
 
+// ─── tabbed right pane: inspector / domain graph ─────────────────────
+function graphActive() {
+  return document.querySelector(".tab.active")?.dataset.tab === "graph";
+}
+document.querySelectorAll(".tab").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
+    tab.classList.add("active");
+    document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
+    $("tab-" + tab.dataset.tab).classList.add("active");
+    if (tab.dataset.tab === "graph") {
+      resizeGraph();
+      renderGraph();
+    }
+  });
+});
+
+// ─── domain graph (force-directed, canvas) ─────────────────────────────
+// Nodes = origins (hostnames) touched by the selected page group. Edge:
+// page origin → called origin, weighted by call count. Node radius scales
+// with call count; colour by eTLD+1 so related subdomains share a hue. Labels
+// sit beside the node with a leader line; full hostname on hover.
+
+const graph = {
+  canvas: null, ctx: null, raf: 0,
+  nodes: [], edges: [], byHost: new Map(),
+  hover: null,
+  // ephemeral selection so replay re-animates from scratch
+  t0: 0,
+};
+
+function initGraph() {
+  graph.canvas = $("graph-canvas");
+  if (!graph.canvas) return;
+  graph.ctx = graph.canvas.getContext("2d");
+  // hover tooltip
+  graph.canvas.addEventListener("mousemove", (e) => {
+    const r = graph.canvas.getBoundingClientRect();
+    const mx = e.clientX - r.left, my = e.clientY - r.top;
+    graph.hover = graph.nodes.find((n) => Math.hypot(n.x - mx, n.y - my) <= n.r + 4) || null;
+    graph.canvas.style.cursor = graph.hover ? "pointer" : "default";
+    // tooltip via title attribute on the canvas
+    graph.canvas.title = graph.hover ? `${graph.hover.host}\n${graph.hover.calls} calls` : "";
+  });
+}
+
+function resizeGraph() {
+  if (!graph.canvas) initGraph();
+  if (!graph.canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = graph.canvas.clientWidth, h = graph.canvas.clientHeight;
+  graph.canvas.width = Math.max(1, w * dpr);
+  graph.canvas.height = Math.max(1, h * dpr);
+  graph.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener("resize", () => { if (graphActive()) { resizeGraph(); renderGraph(); } });
+
+// eTLD+1-ish colour: hash the registrable domain to a hue.
+function domainColor(host) {
+  const parts = host.split(".");
+  const reg = parts.length >= 2 ? parts.slice(-2).join(".") : host;
+  let h = 0;
+  for (let i = 0; i < reg.length; i++) h = (h * 31 + reg.charCodeAt(i)) >>> 0;
+  return `hsl(${h % 360} 55% 45%)`;
+}
+function origin(u) {
+  try { const x = new URL(u); return x.host; } catch { return null; }
+}
+
+// Build nodes/edges for the selected page group (or session-wide fallback).
+function buildGraphData() {
+  const g = state.selectedGroup;
+  // events belonging to this group: walk from the group's first child onward.
+  // We approximate by using seqToGroup membership.
+  const evts = state.events.filter((e) => state.seqToGroup.get(e.seq) === g);
+  const pageOrigin = origin(g ? g.url : "");
+  const nodes = new Map(); // host -> {host, calls, color}
+  const edges = new Map(); // "from\u0000to" -> {from, to, w}
+  const bump = (host, n = 1) => {
+    let nd = nodes.get(host);
+    if (!nd) { nd = { host, calls: 0, color: domainColor(host) }; nodes.set(host, nd); }
+    nd.calls += n;
+  };
+  for (const e of evts) {
+    if (e.kind !== "http" && e.kind !== "ws") continue;
+    const callee = origin(e.data.url);
+    if (!callee) continue;
+    const caller = pageOrigin || callee; // page called it; if no page origin, self
+    if (caller) bump(caller);
+    bump(callee);
+    const key = (caller || callee) + "\u0000" + callee;
+    let ed = edges.get(key);
+    if (!ed) { ed = { from: caller || callee, to: callee, w: 0 }; edges.set(key, ed); }
+    ed.w++;
+  }
+  return { nodes: [...nodes.values()], edges: [...edges.values()] };
+}
+
+function setSelectedGroup(g) {
+  if (state.selectedGroup === g && g) { if (graphActive()) renderGraph(); return; }
+  state.selectedGroup = g;
+  if (graphActive()) renderGraph();
+}
+
+function renderGraph() {
+  if (!graph.canvas) initGraph();
+  if (!graph.canvas) return;
+  const { nodes, edges } = buildGraphData();
+  if (!nodes.length) {
+    if (graph.raf) cancelAnimationFrame(graph.raf), (graph.raf = 0);
+    const ctx = graph.ctx;
+    ctx.clearRect(0, 0, graph.canvas.clientWidth, graph.canvas.clientHeight);
+    ctx.fillStyle = "#8a93a8"; ctx.font = "12px sans-serif";
+    ctx.fillText("no calls in this page", 12, 20);
+    graph.nodes = []; graph.edges = [];
+    return;
+  }
+  // spawn on a small gentle ring so nodes start separated (not clumped at
+  // centre, which causes a violent expansion). Fade-in hides any residual jitter.
+  const W = graph.canvas.clientWidth, H = graph.canvas.clientHeight;
+  const cx = W / 2, cy = H / 2;
+  const byHost = new Map(nodes.map((n) => [n.host, { ...n, x: cx, y: cy, vx: 0, vy: 0, r: 10 + Math.sqrt(n.calls) * 5 }]));
+  const R0 = Math.min(W, H) * 0.18;
+  let i = 0;
+  for (const n of byHost.values()) {
+    const a = (i++ / byHost.size) * Math.PI * 2;
+    n.x = cx + Math.cos(a) * R0;
+    n.y = cy + Math.sin(a) * R0;
+  }
+  graph.nodes = [...byHost.values()];
+  graph.edges = edges.map((e) => ({ ...e, from: byHost.get(e.from), to: byHost.get(e.to) })).filter((e) => e.from && e.to);
+  graph.byHost = byHost;
+  graph.t0 = performance.now();
+  if (!graph.raf) tickGraph();
+}
+
+// No force simulation / movement on spawn — nodes are placed statically and
+// only the glow pulses. The RAF loop just re-draws so the pulse animates.
+function tickGraph() {
+  drawGraph();
+  graph.raf = requestAnimationFrame(tickGraph);
+}
+
+function drawGraph() {
+  const ctx = graph.ctx;
+  const W = graph.canvas.clientWidth, H = graph.canvas.clientHeight;
+  ctx.clearRect(0, 0, W, H);
+  // edges with arrowheads
+  for (const e of graph.edges) {
+    const a = e.from, b = e.to;
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const d = Math.hypot(dx, dy) || 0.01;
+    const ux = dx / d, uy = dy / d;
+    // endpoints on circle borders
+    const x1 = a.x + ux * a.r, y1 = a.y + uy * a.r;
+    const x2 = b.x - ux * (b.r + 6), y2 = b.y - uy * (b.r + 6);
+    ctx.strokeStyle = `rgba(140,160,190,${Math.min(0.85, 0.35 + e.w * 0.12)})`;
+    ctx.lineWidth = Math.min(4, 1 + Math.log2(1 + e.w));
+    ctx.beginPath();
+    ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    // arrowhead
+    const ah = 7;
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.beginPath();
+    ctx.moveTo(x2, y2);
+    ctx.lineTo(x2 - ux * ah + uy * ah * 0.5, y2 - uy * ah - ux * ah * 0.5);
+    ctx.lineTo(x2 - ux * ah - uy * ah * 0.5, y2 - uy * ah + ux * ah * 0.5);
+    ctx.closePath(); ctx.fill();
+  }
+  // nodes — radial-gradient halo + core, both pulsing; fade in on spawn.
+  const nowMs = performance.now();
+  const now = nowMs / 1000;
+  const fade = Math.min(1, (nowMs - graph.t0) / 600);
+  for (const n of graph.nodes) {
+    const pulse = 0.5 + 0.5 * Math.sin(now * 2.2 + n.calls);   // 0..1
+    const r = n.r * (1 + pulse * 0.18);                         // visible size breath
+    const haloR = r + 14 + pulse * 26;                          // wide glow
+    ctx.save();
+    // halo: radial gradient colour -> transparent (reads strong on dark bg)
+    const grad = ctx.createRadialGradient(n.x, n.y, r * 0.4, n.x, n.y, haloR);
+    grad.addColorStop(0, n.color);
+    grad.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.globalAlpha = (0.35 + pulse * 0.45) * fade * (graph.hover === n ? 1.3 : 1);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, haloR, 0, Math.PI * 2);
+    ctx.fill();
+    // core
+    ctx.globalAlpha = fade * (graph.hover === n ? 1 : 0.95);
+    ctx.shadowBlur = 18 + pulse * 26;
+    ctx.shadowColor = n.color;
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = n.color;
+    ctx.fill();
+    ctx.restore();
+    ctx.globalAlpha = 1;
+    ctx.lineWidth = graph.hover === n ? 2.5 : 1.5;
+    ctx.strokeStyle = "#fff"; ctx.stroke();
+  }
+  // labels beside node with leader line, truncated
+  for (const n of graph.nodes) {
+    const ang = Math.atan2(n.y - H / 2, n.x - W / 2) || 0;
+    const lx = n.x + Math.cos(ang) * (n.r + 6);
+    const ly = n.y + Math.sin(ang) * (n.r + 6);
+    // leader line
+    ctx.strokeStyle = "#5a6478"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(n.x + Math.cos(ang) * n.r, n.y + Math.sin(ang) * n.r);
+    ctx.lineTo(lx, ly); ctx.stroke();
+    // label (right of point if ang points right-ish, else left)
+    const full = n.host;
+    const max = 24;
+    const label = full.length > max ? full.slice(0, max - 1) + "…" : full;
+    ctx.font = "11px ui-monospace, Menlo, monospace";
+    const tw = ctx.measureText(label).width;
+    const right = Math.cos(ang) >= 0;
+    const tx = right ? lx + 3 : lx - tw - 3;
+    ctx.fillStyle = "#e8ecf5";
+    ctx.fillText(label, tx, ly + 4);
+    ctx.fillStyle = "#8a93a8"; ctx.font = "9px sans-serif";
+    ctx.fillText(`${n.calls}`, right ? tx : tx, ly + 14);
+  }
+}
+
+// replay button: re-seed positions and re-animate
+$("graph-replay").addEventListener("click", () => { renderGraph(); });
+
+// keep the canvas sized to its pane (divider drag, window resize, tab switch)
+if (typeof ResizeObserver !== "undefined" && $("inspector")) {
+  new ResizeObserver(() => { if (graphActive()) { resizeGraph(); } }).observe($("inspector"));
+}
+
 // ─── boot ────────────────────────────────────────────────────────────
+initGraph();
 setupDividers();
 loadSessions();
 poll();

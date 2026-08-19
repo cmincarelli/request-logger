@@ -109,6 +109,21 @@ main { display: flex; flex: 1; min-height: 0; }
 .m-GET { color: #2a7; } .m-POST { color: #c72; } .m-PUT { color: #47c; }
 .m-DELETE { color: #c33; } .m-PATCH { color: #a3c; }
 
+/* ── tabbed right pane ──────────────────────────────────────────── */
+.tabs { display: flex; gap: 0; border-bottom: 1px solid #ddd; background: #f5f5f5; flex-shrink: 0; }
+.tab {
+  font: inherit; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: #888;
+  padding: 8px 14px; border: none; border-right: 1px solid #ddd; background: transparent; cursor: pointer; border-radius: 0;
+}
+.tab:hover { background: #eee; color: #444; }
+.tab.active { background: #fff; color: #1a1a1a; border-bottom: 2px solid #5a7; margin-bottom: -1px; }
+.tab-panel { display: none; flex: 1; min-height: 0; flex-direction: column; }
+.tab-panel.active { display: flex; }
+#tab-graph { padding: 0; }
+.graph-toolbar { display: flex; align-items: center; justify-content: space-between; padding: 4px 10px; border-bottom: 1px solid #eee; flex-shrink: 0; }
+.graph-hint { font-size: 10px; color: #999; }
+#graph-canvas { flex: 1; min-height: 0; display: block; background: #1a1f2e; }
+
 /* ── inspector ─────────────────────────────────────────────────────── */
 #inspector-body { padding: 10px; font-size: 12px; }
 .hint { color: #aaa; }
