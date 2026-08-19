@@ -93,7 +93,7 @@ export interface CaptureHandle {
   close: () => Promise<void>;
 }
 
-export async function startCapture(log: SessionLog): Promise<CaptureHandle> {
+export async function startCapture(getLog: () => SessionLog): Promise<CaptureHandle> {
   const targets = new Map<string, TargetState>();
   const maxBody = config.maxBodyBytes;
 
@@ -106,7 +106,7 @@ export async function startCapture(log: SessionLog): Promise<CaptureHandle> {
   await browser.Target.setDiscoverTargets({ discover: true });
 
   const emit = (kind: "http" | "ws" | "ui", data: any, tab: TabRef) => {
-    log.append({ t: Date.now(), kind, tab, data });
+    getLog().append({ t: Date.now(), kind, tab, data });
   };
 
   async function attach(targetInfo: any) {

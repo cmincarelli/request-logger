@@ -161,7 +161,18 @@ export function templatePath(pathname: string): string {
     .join("/");
 }
 
-export async function startServer(): Promise<{ close: () => Promise<void> }> {
+export interface ServerOptions {
+  /** Called by POST /api/sessions/new to rotate capture to a fresh session. */
+  onNewSession?: () => string;
+}
+
+export async function startServer(opts: ServerOptions = {}): Promise<{ close: () => Promise<void> }> {
+  // Rotate capture to a new session file. Returns the new session id.
+  app.post("/api/sessions/new", async (_req, reply) => {
+    if (!opts.onNewSession) return reply.code(501).send({ ok: false, error: "capture not running in-process" });
+    const id = opts.onNewSession();
+    return { ok: true, data: { id } };
+  });
   await app.listen({ host: config.readerHost, port: config.readerPort });
   console.log(`[reader] http://${config.readerHost}:${config.readerPort}`);
   console.log(`[reader] logs: ${resolve(config.logDir)}`);

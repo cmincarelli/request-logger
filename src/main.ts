@@ -123,9 +123,10 @@ async function stopChrome(child: ChildProcess): Promise<void> {
 // ─── orchestration ───────────────────────────────────────────────────
 
 async function main() {
-  const log = SessionLog.create(config.logDir, config.sessionLabel);
-  console.log(`[logger] session ${log.sessionId}`);
-  console.log(`[logger] writing ${log.path}`);
+  let currentLog = SessionLog.create(config.logDir, config.sessionLabel);
+  console.log(`[logger] session ${currentLog.sessionId}`);
+  console.log(`[logger] writing ${currentLog.path}`);
+  const getLog = () => currentLog;
 
   // 1. Chrome
   let chrome: { child: ChildProcess | null };
@@ -147,7 +148,7 @@ async function main() {
   // 2. Capture
   let capture: CaptureHandle;
   try {
-    capture = await startCapture(log);
+    capture = await startCapture(getLog);
   } catch (err) {
     console.error("[logger] failed to attach to Chrome:", err);
     if (chrome.child) await stopChrome(chrome.child);
@@ -157,7 +158,14 @@ async function main() {
   // 3. Reader
   let server: { close: () => Promise<void> };
   try {
-    server = await startServer();
+    server = await startServer({
+      onNewSession: () => {
+        currentLog = SessionLog.create(config.logDir, config.sessionLabel);
+        console.log(`[logger] new session ${currentLog.sessionId}`);
+        console.log(`[logger] writing ${currentLog.path}`);
+        return currentLog.sessionId;
+      },
+    });
   } catch (err) {
     console.error("[logger] failed to start reader:", err);
     try {
@@ -174,7 +182,7 @@ async function main() {
 
   // Heartbeat so you can see capture is alive.
   const hb = setInterval(() => {
-    const m = log.manifestEntry();
+    const m = currentLog.manifestEntry();
     console.log(
       `[logger] heartbeat http=${m.counts.http} ws=${m.counts.ws} ui=${m.counts.ui}`
     );
@@ -203,8 +211,8 @@ async function main() {
       console.log("[logger] closing Chrome");
       await stopChrome(chrome.child);
     }
-    console.log(`[logger] session ${log.sessionId} manifest:`);
-    console.log(JSON.stringify(log.manifestEntry(), null, 2));
+    console.log(`[logger] session ${currentLog.sessionId} manifest:`);
+    console.log(JSON.stringify(currentLog.manifestEntry(), null, 2));
     process.exit(0);
   };
   process.on("SIGINT", () => void shutdown("SIGINT"));

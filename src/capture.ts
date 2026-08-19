@@ -29,6 +29,7 @@ async function main() {
   console.log(`[logger] writing ${log.path}`);
   console.log(`[logger] attaching to ${config.cdpHost}:${config.cdpPort} ...`);
   console.log(`[logger] reader at http://${config.readerHost}:${config.readerPort}`);
+  const getLog = () => log;
 
   // Wait for Chrome so capture can start before/alongside the browser boot.
   try {
@@ -42,7 +43,7 @@ async function main() {
 
   let handle;
   try {
-    handle = await startCapture(log);
+    handle = await startCapture(getLog);
   } catch (err) {
     console.error("[logger] failed to attach to Chrome:", err);
     console.error("[logger] is Chrome running with --remote-debugging-port?  run: pnpm chrome");

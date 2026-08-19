@@ -540,6 +540,21 @@ $("export-btn").onclick = () => {
   a.remove();
 };
 
+// Start a fresh capture session: capture rotates to a new JSONL file (the old
+// one is preserved on disk). Reload the session list and switch to the new one.
+$("new-session-btn").onclick = async () => {
+  try {
+    const r = await fetch("/api/sessions/new", { method: "POST" }).then((r) => r.json());
+    if (!r.ok) { alert("new session failed: " + r.error); return; }
+    await loadSessions();
+    state.sessionId = r.data.id;
+    $("session").value = r.data.id;
+    reset();
+  } catch (err) {
+    alert("new session failed: " + err);
+  }
+};
+
 $("import-file").addEventListener("change", async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
