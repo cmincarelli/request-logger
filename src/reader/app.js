@@ -137,16 +137,19 @@ function appendEvent(evt) {
 
   const boundary = pageBoundary(evt);
   if (boundary) {
-    // merge: a Document fills in the status of a pending UI-marker group for the same url
+    // Every navigation opens a fresh group. The one exception: an `install` UI
+    // event arrives just before the page's own Document request for the same
+    // URL — skip the install marker so it doesn't double-open; the Document
+    // (which carries the status) is the real header.
+    // An `install` UI marker is emitted right before the page's own Document
+    // request for the same URL. Skip the marker so each navigation opens
+    // exactly one group (the Document, which carries the status).
     if (
-      boundary.kind === "document" &&
-      state.currentGroup &&
-      state.currentGroup.createdBy === "ui" &&
-      state.currentGroup.url === boundary.url
+      boundary.kind === "ui" &&
+      state.events.some(
+        (e) => e.seq > evt.seq && e.kind === "http" && e.data.resourceType === "Document" && e.data.url === boundary.url
+      )
     ) {
-      state.currentGroup.status = boundary.status;
-      state.currentGroup.createdBy = "document";
-      if (state.currentGroup.statusEl) state.currentGroup.statusEl.textContent = boundary.status;
       return;
     }
     openGroup(boundary.url, boundary.status, boundary.kind);
@@ -193,7 +196,7 @@ function openGroup(url, status, createdBy) {
   };
   groupEl.append(headerEl, body);
   $("page-list").appendChild(groupEl);
-  const g = { url, status, createdBy, count: 0, groupEl, headerEl, body, caret, countEl, statusEl };
+  const g = { url, status, createdBy, count: 0, groupEl, headerEl, body, caret, countEl, statusEl, openedAt: Date.now() };
   state.groups.push(g);
   state.currentGroup = g;
 }
@@ -254,15 +257,13 @@ function rebuild() {
     for (const evt of state.events) {
       const boundary = pageBoundary(evt);
       if (boundary) {
+        // skip install UI marker when a Document for the same URL exists
         if (
-          boundary.kind === "document" &&
-          state.currentGroup &&
-          state.currentGroup.createdBy === "ui" &&
-          state.currentGroup.url === boundary.url
+          boundary.kind === "ui" &&
+          state.events.some(
+            (e) => e.seq > evt.seq && e.kind === "http" && e.data.resourceType === "Document" && e.data.url === boundary.url
+          )
         ) {
-          state.currentGroup.status = boundary.status;
-          state.currentGroup.createdBy = "document";
-          state.currentGroup.statusEl.textContent = boundary.status;
           continue;
         }
         openGroup(boundary.url, boundary.status, boundary.kind);
@@ -370,7 +371,34 @@ function renderHttpInspector(evt, body) {
   const btn = document.createElement("button");
   btn.className = "copy";
   btn.textContent = "copy curl";
-  btn.onclick = () => navigator.clipboard.writeText(toCurl(h));
+  btn.onclick = async () => {
+    const text = toCurl(h);
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    } catch {
+      // clipboard API may be blocked (non-secure context / no gesture);
+      // fall back to a transient textarea + execCommand copy.
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        ok = true;
+      } catch {
+        ok = false;
+      }
+    }
+    const orig = "copy curl";
+    btn.textContent = ok ? "✓ copied" : "✗ copy failed";
+    btn.classList.toggle("copied", ok);
+    setTimeout(() => { btn.textContent = orig; btn.classList.remove("copied"); }, 1500);
+  };
   body.appendChild(btn);
   const pre = document.createElement("pre");
   pre.className = "curl";
