@@ -1,0 +1,25 @@
+{
+  "name": "logger",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Attach to a real Chrome over CDP, capture network + user events to JSONL, and explore the APIs that drive a site.",
+  "scripts": {
+    "start": "tsx src/capture.ts",
+    "server": "tsx src/server.ts",
+    "dev": "tsx watch src/capture.ts",
+    "typecheck": "tsc --noEmit",
+    "chrome": "bash scripts/chrome-debug.sh"
+  },
+  "dependencies": {
+    "@fastify/static": "^8.0.0",
+    "chrome-remote-interface": "^0.33.3",
+    "dotenv": "^16.4.5",
+    "fastify": "^5.8.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

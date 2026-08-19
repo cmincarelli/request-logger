@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8" /><title>Logger self-test</title></head>
+  <body>
+    <h1>Logger self-test page</h1>
+    <p>This page fires fetch/XHR calls after load so Logger captures them.</p>
+    <button id="b1">GET /get</button>
+    <button id="b2">POST /post</button>
+    <input id="q" type="text" placeholder="type here" />
+    <pre id="out"></pre>
+    <script>
+      function log(s) {
+        document.getElementById("out").textContent += s + "\n";
+      }
+      async function doGet() {
+        const r = await fetch("https://httpbin.org/get?from=logger");
+        log("GET " + r.status);
+      }
+      async function doPost() {
+        const r = await fetch("https://httpbin.org/post", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer test-token-xyz" },
+          body: JSON.stringify({ hello: "world", n: 42 }),
+        });
+        log("POST " + r.status);
+      }
+      // Fire some automatically so we don't need to click.
+      doGet();
+      setTimeout(doPost, 300);
+      setTimeout(doGet, 600);
+      document.getElementById("b1").onclick = doGet;
+      document.getElementById("b2").onclick = doPost;
+      document.getElementById("q").addEventListener("input", (e) => log("input: " + e.target.value));
+    </script>
+  </body>
+</html>
