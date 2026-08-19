@@ -26,15 +26,29 @@
       <section id="pages" class="pane">
         <h2>Pages <span id="page-count"></span> <button id="collapse-all-btn" class="mini-btn" title="collapse/expand all page groups">collapse all</button></h2>
         <div id="filter-bar" class="filter-bar">
-          <span class="filter-label">show:</span>
-          <button class="chip" data-f="GET">GET</button>
-          <button class="chip" data-f="POST">POST</button>
-          <button class="chip" data-f="PUT">PUT</button>
-          <button class="chip" data-f="DELETE">DELETE</button>
-          <button class="chip" data-f="PATCH">PATCH</button>
-          <button class="chip" data-f="WS">WS</button>
-          <button class="chip" data-f="UI">UI</button>
-          <button class="chip chip-clear" data-f="" title="clear filters">all</button>
+          <div class="filter-row">
+            <input id="text-filter" type="search" class="text-filter" placeholder="filter by domain / path…" />
+            <select id="type-filter" class="type-filter" title="resource type">
+              <option value="">all types</option>
+              <option value="Document">Document</option>
+              <option value="Fetch">Fetch</option>
+              <option value="XHR">XHR</option>
+              <option value="Other">Other (API)</option>
+              <option value="WS">WebSocket</option>
+              <option value="UI">UI event</option>
+            </select>
+          </div>
+          <div class="filter-row">
+            <span class="filter-label">show:</span>
+            <button class="chip" data-f="GET">GET</button>
+            <button class="chip" data-f="POST">POST</button>
+            <button class="chip" data-f="PUT">PUT</button>
+            <button class="chip" data-f="DELETE">DELETE</button>
+            <button class="chip" data-f="PATCH">PATCH</button>
+            <button class="chip" data-f="WS">WS</button>
+            <button class="chip" data-f="UI">UI</button>
+            <button class="chip chip-clear" data-f="" title="clear filters">all</button>
+          </div>
         </div>
         <div id="page-list"></div>
       </section>

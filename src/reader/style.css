@@ -51,11 +51,13 @@ main { display: flex; flex: 1; min-height: 0; }
 .pane h2 span { color: #aaa; font-weight: normal; }
 #page-list, #inspector-body { overflow: auto; flex: 1; min-width: 0; }
 .filter-bar {
-  display: flex; align-items: center; gap: 4px;
-  padding: 6px 10px;          /* horizontal matches h2 (10px); vertical gives breathing room */
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 6px 10px;
   border-bottom: 1px solid #eee; background: #fafbfc; flex-shrink: 0;
-  flex-wrap: wrap;
 }
+.filter-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.text-filter { font: inherit; font-size: 11px; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; flex: 1; min-width: 120px; }
+.type-filter { font: inherit; font-size: 11px; padding: 3px 4px; border: 1px solid #ccc; border-radius: 4px; }
 .filter-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: #888; margin-right: 4px; }
 .chip {
   font: inherit; font-size: 10px; font-weight: 600;
