@@ -430,16 +430,16 @@ function renderHttpInspector(evt, body) {
   const h = evt.data;
   body.appendChild(metaCard(httpMeta(h)));
   body.appendChild(section("Request", `${h.method} ${h.url}`));
-  body.appendChild(kvSection("Request headers", h.requestHeaders));
+  body.appendChild(kvSection("Request headers", h.requestHeaders, "http"));
   body.appendChild(
     h.requestBody != null
-      ? prettySection("Request body", h.requestBody, h.requestBodyTruncated)
+      ? requestBodySection(h)
       : placeholder("Request body", "none")
   );
-  body.appendChild(kvSection("Response headers", h.responseHeaders));
+  body.appendChild(kvSection("Response headers", h.responseHeaders, "http"));
   body.appendChild(
     h.responseBody != null
-      ? prettySection("Response body", h.responseBody, h.responseBodyTruncated, h.responseBodyBase64)
+      ? prettySection("Response body", h.responseBody, h.responseBodyTruncated, h.responseBodyBase64, detectLang(h.mimeType))
       : placeholder("Response body", h.status === 0 ? "no response" : "none")
   );
   const btn = document.createElement("button");
@@ -474,15 +474,20 @@ function renderHttpInspector(evt, body) {
     setTimeout(() => { btn.textContent = orig; btn.classList.remove("copied"); }, 1500);
   };
   body.appendChild(btn);
+  const curlBox = document.createElement("div");
+  curlBox.className = "code-block code-block-curl";
   const pre = document.createElement("pre");
   pre.className = "curl";
-  pre.textContent = toCurl(h);
-  body.appendChild(pre);
+  const curlText = toCurl(h);
+  pre.textContent = curlText;
+  curlBox.append(pre);
+  body.appendChild(curlBox);
+  colorize(curlBox, curlText, "bash");
 }
 function renderWsInspector(evt, body) {
   const w = evt.data;
   body.appendChild(metaCard([{ k: "type", v: "WebSocket" }, { k: "direction", v: w.direction }, { k: "opcode", v: w.opcode }, { k: "url", v: w.url }]));
-  body.appendChild(w.payload ? prettySection("Payload", w.payload, w.payloadTruncated, w.base64) : placeholder("Payload", "empty"));
+  body.appendChild(w.payload ? prettySection("Payload", w.payload, w.payloadTruncated, w.base64, wsLang(w.payload, w.base64)) : placeholder("Payload", "empty"));
 }
 function renderUiInspector(evt, body) {
   const u = evt.data;
@@ -546,26 +551,121 @@ function placeholder(title, reason) {
   d.innerHTML = `<h3>${title}</h3><div class="kv hint">${reason}</div>`;
   return d;
 }
-function kvSection(title, obj) {
+function kvSection(title, obj, lang) {
   const d = document.createElement("div");
   d.className = "ins-section";
   const h = document.createElement("h3");
   h.textContent = title;
+  const box = document.createElement("div");
+  box.className = "code-block";
   const pre = document.createElement("pre");
   const entries = Object.entries(obj);
-  pre.textContent = entries.length ? entries.map(([k, v]) => `${k}: ${v}`).join("\n") : "— none —";
-  d.append(h, pre);
+  const text = entries.length ? entries.map(([k, v]) => `${k}: ${v}`).join("\n") : "— none —";
+  pre.textContent = text;
+  box.append(pre);
+  d.append(h, box);
+  colorize(box, text, lang);
   return d;
 }
-function prettySection(title, body, truncated, base64) {
+function prettySection(title, body, truncated, base64, lang) {
   const d = document.createElement("div");
   d.className = "ins-section";
   const h = document.createElement("h3");
   h.textContent = title + (truncated ? " (truncated)" : "") + (base64 ? " (base64/binary)" : "");
+  const box = document.createElement("div");
+  box.className = "code-block";
   const pre = document.createElement("pre");
-  pre.textContent = tryPretty(body);
-  d.append(h, pre);
+  const pretty = tryPretty(body);
+  pre.textContent = pretty;
+  box.append(pre);
+  d.append(h, box);
+  colorize(box, pretty, lang);
   return d;
+}
+
+// Render a request body. Parse it into a structured, colored view when we can:
+//   - Content-Type says urlencoded, OR the body *looks* urlencoded (key=val&...)
+//     → split on & and =, URI-decode, render as `key: value` lines.
+//   - Content-Type says JSON, OR the body looks like JSON → pretty + color json.
+//   - otherwise → highlight by detected content type, raw fallback.
+// We sniff the body shape because the header is often missing or `text/plain`
+// even when the bytes are clearly a form post or JSON.
+function requestBodySection(h) {
+  const ct = (contentTypeOf(h) || "").toLowerCase();
+  const body = h.requestBody == null ? "" : String(h.requestBody);
+  const looksForm = looksUrlEncoded(body);
+  const looksJson = !looksForm && isProbablyJson(body);
+  if (ct.includes("urlencoded") || (looksForm && !ct.includes("json"))) {
+    const text = parseUrlEncodedDisplay(body);
+    return prettySection("Request body (parsed)", text, h.requestBodyTruncated, false, "http");
+  }
+  const lang = (ct.includes("json") || looksJson) ? "json" : detectLang(ct);
+  return prettySection("Request body", body, h.requestBodyTruncated, false, lang);
+}
+
+// Heuristic: a urlencoded body is `a=b&c=d` lines (newline-separated is fine,
+// Google Analytics uses it). Reject anything that looks like JSON.
+function looksUrlEncoded(s) {
+  const t = s.trim();
+  if (!t || t[0] === "{" || t[0] === "[" || t[0] === "<") return false;
+  return /^[A-Za-z0-9._~%+\-]+(=[^&\n]*)?([\n&][A-Za-z0-9._~%+\-]+(=[^&\n]*)?)*$/.test(t);
+}
+
+function isProbablyJson(s) {
+  const t = s.trim();
+  if (!t) return false;
+  try { JSON.parse(t); return true; } catch { return false; }
+}
+
+// Case-insensitive Content-Type lookup on the request headers.
+function contentTypeOf(h) {
+  const hh = h.requestHeaders || {};
+  for (const k in hh) if (k.toLowerCase() === "content-type") return hh[k];
+  return "";
+}
+
+// Parse an urlencoded body into `key: value` lines, one per pair, in order.
+// Splits on & and \n (Google Analytics separates pairs with newlines); strips
+// any stray \r so it never leaks into a value. Repeated keys are shown on
+// their own lines (not collapsed to an array) to match the header view.
+function parseUrlEncodedDisplay(s) {
+  const lines = [];
+  for (const pair of String(s).replace(/\r/g, "").split(/[&\n]/)) {
+    if (!pair) continue;
+    const i = pair.indexOf("=");
+    const rawK = (i < 0 ? pair : pair.slice(0, i)).replace(/\+/g, " ");
+    const rawV = (i < 0 ? "" : pair.slice(i + 1)).replace(/\+/g, " ");
+    let k, v;
+    try { k = decodeURIComponent(rawK); } catch { k = rawK; }
+    try { v = decodeURIComponent(rawV); } catch { v = rawV; }
+    lines.push(`${k}: ${v}`);
+  }
+  return lines.length ? lines.join("\n") : "— empty —";
+}
+
+// Pick a Shiki language id from a Content-Type / MIME string.
+function detectLang(ct) {
+  ct = (ct || "").toLowerCase();
+  if (ct.includes("json")) return "json";
+  if (ct.includes("html") || ct.includes("xml")) return "html";
+  if (ct.includes("css")) return "css";
+  if (ct.includes("javascript") || ct.includes("ecmascript")) return "javascript";
+  return null;
+}
+
+// WebSocket payloads are often JSON; sniff rather than trust a content type.
+function wsLang(payload, base64) {
+  if (base64) return null;
+  try { JSON.parse(payload); return "json"; } catch { return null; }
+}
+
+// Swap a rendered plain <pre> for Shiki's highlighted HTML. Best-effort:
+// if Shiki isn't loaded / fails / lang unknown, the plain text stays.
+function colorize(box, code, lang) {
+  if (!window.highlightCode || !lang) return;
+  window.highlightCode(code, lang)
+    .then((html) => { if (html) box.innerHTML = html; })
+    .catch(() => {});
 }
 function tryPretty(s) {
   try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return s; }

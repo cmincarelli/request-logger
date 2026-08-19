@@ -142,12 +142,15 @@ main { display: flex; flex: 1; min-height: 0; }
 .meta-v.m-GET, .meta-v.m-POST, .meta-v.m-PUT, .meta-v.m-DELETE, .meta-v.m-PATCH { font-weight: 700; }
 .ins-section { margin-bottom: 12px; min-width: 0; }
 .ins-section h3 { font-size: 11px; text-transform: uppercase; color: #888; margin: 0 0 4px; }
-.ins-section pre {
+.ins-section pre,
+.code-block .shiki {
   margin: 0; padding: 8px; background: #fff; border: 1px solid #e3e3e3;
   border-radius: 4px; font-family: ui-monospace, Menlo, monospace; font-size: 11px;
   overflow: auto; max-height: 280px;
   white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; max-width: 100%;
 }
+.code-block .shiki code { display: block; background: none; }
+.code-block-curl .shiki { word-break: break-all; }
 .kv { font-family: ui-monospace, Menlo, monospace; font-size: 11px; overflow-wrap: anywhere; word-break: break-word; }
 .curl { white-space: pre-wrap; word-break: break-all; }
 button.copy { margin: 4px 0; }
