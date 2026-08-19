@@ -784,14 +784,10 @@ function stepGraph() {
     a.fx += dx * f; a.fy += dy * f;
     b.fx -= dx * f; b.fy -= dy * f;
   }
-  // centre gravity + gentle life
-  const t = (performance.now() - graph.t0) / 1000;
+  // centre gravity (the sim settles; the "life" is a visual pulse in draw, not motion)
   for (const a of ns) {
     a.fx += (cx - a.x) * 0.01;
     a.fy += (cy - a.y) * 0.01;
-    // slight breathing so the graph stays alive after settling
-    a.fx += Math.sin(t + a.calls) * 2;
-    a.fy += Math.cos(t * 0.8 + a.calls) * 2;
   }
   // integrate
   for (const a of ns) {
@@ -832,13 +828,20 @@ function drawGraph() {
     ctx.lineTo(x2 - ux * ah - uy * ah * 0.5, y2 - uy * ah + ux * ah * 0.5);
     ctx.closePath(); ctx.fill();
   }
-  // nodes
+  // nodes — pulsing glow (visual life, not motion)
+  const now = performance.now() / 1000;
   for (const n of graph.nodes) {
+    const pulse = 0.5 + 0.5 * Math.sin(now * 2 + n.calls);   // 0..1
+    const r = n.r * (1 + pulse * 0.06);                       // subtle size breath
+    ctx.save();
+    ctx.shadowBlur = 10 + pulse * 14;
+    ctx.shadowColor = n.color;
     ctx.beginPath();
-    ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+    ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
     ctx.fillStyle = n.color;
     ctx.globalAlpha = graph.hover === n ? 1 : 0.85;
     ctx.fill();
+    ctx.restore();
     ctx.globalAlpha = 1;
     ctx.lineWidth = graph.hover === n ? 2 : 1;
     ctx.strokeStyle = "#fff"; ctx.stroke();
