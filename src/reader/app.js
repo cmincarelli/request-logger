@@ -48,6 +48,10 @@ function reset() {
   $("event-count").textContent = "";
   $("endpoint-count").textContent = "";
   poll();
+  // Also immediately render whatever state we have (covers the case where the
+  // first poll hasn't returned yet but events already exist).
+  renderEndpoints();
+  $("event-count").textContent = `(${state.events.length})`;
 }
 
 let pollTimer = null;
@@ -62,8 +66,6 @@ async function poll() {
       state.events.push(...r.data.events);
       state.lastSeq = r.data.lastSeq;
       for (const evt of r.data.events) appendEvent(evt);
-      $("event-count").textContent = `(${state.events.length})`;
-      renderEndpoints();
       // auto-select the first http event so the inspector isn't empty
       if (wasEmpty && state.selected == null) {
         const firstHttp = state.events.find((e) => e.kind === "http");
@@ -71,6 +73,11 @@ async function poll() {
       }
       if (state.nearBottom) $("event-list").scrollTop = $("event-list").scrollHeight;
     }
+    // Always reflect current state — a poll with 0 new events still needs
+    // the endpoint list + counts to render (e.g. right after a session switch
+    // whose events all arrived in an earlier poll, or a reload).
+    renderEndpoints();
+    $("event-count").textContent = `(${state.events.length})`;
   } catch (e) {
     /* ignore transient */
   }
@@ -376,6 +383,55 @@ $("auth-btn").onclick = async () => {
   alert("Auth snapshot logged to browser console");
 };
 
+// ─── resizable columns ──────────────────────────────────────────────
+// Drag the dividers between panes; widths persist in localStorage.
+function setupDividers() {
+  const main = document.querySelector("main");
+  const endpoints = $("endpoints");
+  const timeline = $("timeline");
+  const MIN = 160;
+
+  // restore saved widths
+  const savedE = localStorage.getItem("logger.w.endpoints");
+  const savedT = localStorage.getItem("logger.w.timeline");
+  if (savedE) setWidth(endpoints, savedE);
+  if (savedT) setWidth(timeline, savedT);
+
+  function setWidth(pane, px) {
+    const clamped = Math.max(MIN, Number(px) || MIN);
+    pane.style.flex = `0 0 ${clamped}px`;
+  }
+
+  function drag(d, leftPane, key) {
+    d.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      d.classList.add("dragging");
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      const startX = e.clientX;
+      const startW = leftPane.getBoundingClientRect().width;
+      const onMove = (ev) => {
+        const w = Math.max(MIN, startW + (ev.clientX - startX));
+        leftPane.style.flex = `0 0 ${w}px`;
+      };
+      const onUp = () => {
+        d.classList.remove("dragging");
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+        localStorage.setItem(key, leftPane.getBoundingClientRect().width);
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+  }
+
+  drag($("divider-1"), endpoints, "logger.w.endpoints");
+  drag($("divider-2"), timeline, "logger.w.timeline");
+}
+
 // ─── boot ─────────────────────────────────────────────────────────────
+setupDividers();
 loadSessions();
 poll();
