@@ -9,7 +9,8 @@ const state = {
   events: [],
   selected: null,         // seq of the selected event
   renderedSeqs: new Set(), // seqs already in the DOM
-  filter: "",
+  filter: "",            // free-text substring filter
+  endpointFilter: null,   // {method, origin, template} | null
   nearBottom: true,
 };
 
@@ -42,6 +43,7 @@ function reset() {
   state.selected = null;
   state.renderedSeqs = new Set();
   state.nearBottom = true;
+  state.endpointFilter = null;
   $("event-list").innerHTML = "";
   $("endpoint-list").innerHTML = "";
   $("inspector-body").innerHTML = '<p class="hint">select a request to inspect</p>';
@@ -125,11 +127,17 @@ function buildRow(evt) {
 }
 
 function matchesFilter(evt) {
+  // structured endpoint filter takes precedence (set by clicking an endpoint)
+  if (state.endpointFilter) {
+    const f = state.endpointFilter;
+    if (evt.kind !== "http") return false;
+    let p;
+    try { p = new URL(evt.data.url); } catch { return false; }
+    return evt.data.method === f.method && p.origin === f.origin && templatePath(p.pathname) === f.template;
+  }
   const f = state.filter;
   if (!f) return true;
-  const s = summary(evt).toLowerCase();
-  // also match the raw method so "POST" filters work
-  return s.includes(f);
+  return summary(evt).toLowerCase().includes(f);
 }
 
 // full rebuild (used on filter change / session reset)
@@ -147,6 +155,7 @@ function rebuildTimeline() {
 
 $("filter").addEventListener("input", (e) => {
   state.filter = e.target.value.toLowerCase();
+  state.endpointFilter = null; // typing clears the structured filter
   rebuildTimeline();
 });
 
@@ -197,11 +206,12 @@ function renderEndpoints() {
     const key = `${h.method} ${p.origin}${tpl}`;
     let g = groups.get(key);
     if (!g) {
-      g = { method: h.method, origin: p.origin, tpl, count: 0, statuses: {} };
+      g = { method: h.method, origin: p.origin, tpl, count: 0, statuses: {}, sampleSeq: evt.seq };
       groups.set(key, g);
     }
     g.count++;
     g.statuses[h.status] = (g.statuses[h.status] || 0) + 1;
+    g.sampleSeq = evt.seq; // keep the most recent call as the sample
   }
   const sorted = [...groups.values()].sort((a, b) => b.count - a.count);
   const list = $("endpoint-list");
@@ -222,9 +232,14 @@ function renderEndpoints() {
       .join(" ")}`;
     row.append(m, path, meta);
     row.onclick = () => {
-      state.filter = `${g.method} ${g.tpl}`.toLowerCase();
-      $("filter").value = `${g.method} ${g.tpl}`;
+      state.endpointFilter = { method: g.method, origin: g.origin, template: g.tpl };
+      state.filter = "";
+      $("filter").value = `${g.method} ${g.origin}${g.tpl}`;
       rebuildTimeline();
+      // drive the inspector to the most recent call for this endpoint
+      selectBySeq(g.sampleSeq);
+      const row2 = $("event-list").querySelector(`.event[data-seq="${g.sampleSeq}"]`);
+      if (row2) row2.scrollIntoView({ block: "nearest" });
     };
     list.appendChild(row);
   }
@@ -246,15 +261,26 @@ function templatePath(pathname) {
 
 // ─── inspector ─────────────────────────────────────────────────────────
 function selectBySeq(seq) {
-  const row = $("event-list").querySelector(`.event[data-seq="${seq}"]`);
   const evt = state.events.find((e) => e.seq === seq);
-  if (evt && row) selectEvent(evt, row);
+  if (!evt) return;
+  state.selected = seq;
+  renderInspector(evt);
+  highlightRow(seq);
+}
+
+function highlightRow(seq) {
+  document.querySelectorAll(".event.selected").forEach((e) => e.classList.remove("selected"));
+  const row = $("event-list").querySelector(`.event[data-seq="${seq}"]`);
+  if (row) row.classList.add("selected");
 }
 
 function selectEvent(evt, row) {
   state.selected = evt.seq;
-  document.querySelectorAll(".event.selected").forEach((e) => e.classList.remove("selected"));
-  row.classList.add("selected");
+  renderInspector(evt);
+  highlightRow(evt.seq);
+}
+
+function renderInspector(evt) {
   const body = $("inspector-body");
   body.innerHTML = "";
   if (evt.kind === "http") renderHttpInspector(evt, body);
