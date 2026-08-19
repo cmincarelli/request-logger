@@ -116,6 +116,28 @@
     true
   );
 
+  // Client-side routing often calls history.pushState/replaceState directly,
+  // which fires NO popstate/hashchange event (by spec). Patch them so the
+  // reader can still open a new page header on every route change. The patched
+  // methods behave identically to the originals.
+  var emitNav = function () {
+    send({ type: "nav", t: Date.now(), meta: { url: location.href } });
+  };
+  var origPush = history.pushState;
+  var origReplace = history.replaceState;
+  history.pushState = function () {
+    var r = origPush.apply(this, arguments);
+    emitNav();
+    return r;
+  };
+  history.replaceState = function () {
+    var r = origReplace.apply(this, arguments);
+    emitNav();
+    return r;
+  };
+  // Some routers also listen for popstate and re-dispatch; harmless here since
+  // emitNav only fires on actual API calls above.
+
   document.addEventListener(
     "keydown",
     function (e) {

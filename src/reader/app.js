@@ -105,7 +105,7 @@ $("page-list").addEventListener("scroll", () => {
 //   • ui install/popstate/hashchange → SPA / fallback navigation marker
 // Consecutive boundaries for the same visit merge (e.g. an install UI event
 // followed by that page's Document request) instead of opening two groups.
-const BOUNDARY_UI = new Set(["install", "popstate", "hashchange"]);
+const BOUNDARY_UI = new Set(["install", "popstate", "hashchange", "nav"]);
 
 function pageBoundary(evt) {
   if (evt.kind === "ui" && BOUNDARY_UI.has(evt.data.type))
@@ -138,14 +138,12 @@ function appendEvent(evt) {
   const boundary = pageBoundary(evt);
   if (boundary) {
     // Every navigation opens a fresh group. The one exception: an `install` UI
-    // event arrives just before the page's own Document request for the same
-    // URL — skip the install marker so it doesn't double-open; the Document
-    // (which carries the status) is the real header.
-    // An `install` UI marker is emitted right before the page's own Document
-    // request for the same URL. Skip the marker so each navigation opens
-    // exactly one group (the Document, which carries the status).
+    // marker is emitted right before the page's own Document request for the
+    // same URL — skip the install marker so the Document (which carries the
+    // status) is the sole header. `nav`/`popstate`/`hashchange` are real route
+    // changes with no following Document, so they always open their own group.
     if (
-      boundary.kind === "ui" &&
+      evt.data.type === "install" &&
       state.events.some(
         (e) => e.seq > evt.seq && e.kind === "http" && e.data.resourceType === "Document" && e.data.url === boundary.url
       )
@@ -257,9 +255,9 @@ function rebuild() {
     for (const evt of state.events) {
       const boundary = pageBoundary(evt);
       if (boundary) {
-        // skip install UI marker when a Document for the same URL exists
+        // skip install UI marker when a Document for the same URL follows it
         if (
-          boundary.kind === "ui" &&
+          evt.data.type === "install" &&
           state.events.some(
             (e) => e.seq > evt.seq && e.kind === "http" && e.data.resourceType === "Document" && e.data.url === boundary.url
           )
