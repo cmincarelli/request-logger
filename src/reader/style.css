@@ -70,7 +70,22 @@ main { display: flex; flex: 1; min-height: 0; }
 .chip-clear.active { background: #eee; border-color: #ccc; color: #555; }
 .mini-btn { font-size: 10px; padding: 1px 6px; margin-left: 6px; }
 
-/* ── page groups ───────────────────────────────────────────────────── */
+/* ── tab strip (one button per Chrome tab) ────────────────────── */
+.tab-strip {
+  display: flex; gap: 0; overflow-x: auto; flex-shrink: 0;
+  border-bottom: 1px solid #d8dde3; background: #e9edf1;
+}
+.tab-btn {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 12px; font: inherit; font-size: 11px;
+  border: none; border-right: 1px solid #d8dde3; background: #e9edf1;
+  color: #555; cursor: pointer; white-space: nowrap; max-width: 220px;
+}
+.tab-btn:hover { background: #dde3e9; }
+.tab-btn.active { background: #fff; color: #1a1a1a; font-weight: 600; box-shadow: inset 0 -2px 0 #446; }
+.tab-btn .tab-label { overflow: hidden; text-overflow: ellipsis; }
+
+/* ── page groups (nested under a tab) ─────────────────────────────── */
 .page-group { border-bottom: 1px solid #e0e0e0; }
 .page-group-header {
   display: flex; align-items: center; gap: 8px;
@@ -156,3 +171,18 @@ main { display: flex; flex: 1; min-height: 0; }
 button.copy { margin: 4px 0; }
 button.copy.copied { background: #d4f5d4; border-color: #5a7; color: #246; font-weight: 600; }
 .ins-empty .hint { font-style: italic; }
+
+/* ── export modal ──────────────────────────────────────────────────── */
+.modal { position: fixed; inset: 0; background: rgba(0,0,0,0.35); display: flex; align-items: center; justify-content: center; z-index: 100; }
+.modal.hidden { display: none; }
+.modal-card { background: #fff; border: 1px solid #ccc; border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.2); padding: 18px 20px; min-width: 360px; max-width: 90vw; max-height: 80vh; display: flex; flex-direction: column; gap: 10px; }
+.modal-card h3 { margin: 0; font-size: 14px; }
+.modal-hint { margin: 0; font-size: 11px; color: #888; }
+.export-tab-list { display: flex; flex-direction: column; gap: 4px; overflow: auto; max-height: 50vh; }
+.export-tab-row { display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; padding: 4px 6px; border-radius: 4px; }
+.export-tab-row:hover { background: #f0f4f8; }
+.export-tab-row input { margin: 0; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.modal-btn { font: inherit; font-size: 12px; padding: 5px 14px; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; }
+.modal-btn.primary { background: #446; color: #fff; border-color: #446; }
+.modal-btn.primary:hover { background: #335; }

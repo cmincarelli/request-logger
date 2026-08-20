@@ -105,7 +105,21 @@ export async function startCapture(getLog: () => SessionLog): Promise<CaptureHan
   // targetCreated/targetDestroyed notifications.
   await browser.Target.setDiscoverTargets({ discover: true });
 
-  const emit = (kind: "http" | "ws" | "ui", data: any, tab: TabRef) => {
+  // The reader's own tab is filtered at emit time: any event whose tab is
+  // serving the reader UI (http://{readerHost}:{readerPort}) is dropped. This
+  // kills the self-capture amplification (reader polls its own /events, those
+  // responses get captured as bodies, returned again, re-captured…) without
+  // masking legitimate localhost targets on other ports. Only the reader
+  // service on its own port is special.
+  const readerOrigin = `http://${config.readerHost}:${config.readerPort}`;
+  const isReaderTab = (url: string) =>
+    typeof url === "string" && url.startsWith(readerOrigin);
+
+  const emit = (kind: "http" | "ws" | "ui" | "tab", data: any, tab: TabRef) => {
+    // Drop the reader's own http/ws traffic. Keep `tab` lifecycle + `ui`
+ // events so the reader tab still appears in the strip (it's a real Chrome
+ // tab); only its captured network noise is suppressed.
+    if ((kind === "http" || kind === "ws") && isReaderTab(tab.url)) return;
     getLog().append({ t: Date.now(), kind, tab, data });
   };
 
@@ -296,6 +310,7 @@ export async function startCapture(getLog: () => SessionLog): Promise<CaptureHan
       }
     });
 
+    emit("tab", { action: "open" }, state.tab);
     console.log(`[cdp] attached ${targetId} ${state.tab.url}`);
   }
 
@@ -350,10 +365,23 @@ export async function startCapture(getLog: () => SessionLog): Promise<CaptureHan
   browser.on("Target.targetCreated", (params: any) => {
     attach(params.targetInfo).catch((e) => console.error("[cdp] attach err:", e));
   });
+  // Keep each tab's title/url fresh as Chrome reports target info changes
+  // (page load title, history.title, SPA title mutations). The tab ref is
+  // stamped onto every emitted event, so up-to-date title means accurate
+  // tab labels in the reader without a capture-side re-architecture.
+  browser.on("Target.targetInfoChanged", (params: any) => {
+    const st = targets.get(params.targetInfo?.targetId);
+    if (!st) return;
+    if (typeof params.targetInfo.title === "string") st.tab.title = params.targetInfo.title;
+    if (typeof params.targetInfo.url === "string" && params.targetInfo.url)
+      st.tab.url = params.targetInfo.url;
+    emit("tab", { action: "update" }, st.tab);
+  });
   browser.on("Target.targetDestroyed", (params: any) => {
     const id = params.targetId as string;
     const st = targets.get(id);
     if (st) {
+      emit("tab", { action: "close" }, st.tab);
       st.client.close().catch(() => {});
       targets.delete(id);
       console.log(`[cdp] detached ${id}`);

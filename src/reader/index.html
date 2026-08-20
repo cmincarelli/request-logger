@@ -25,6 +25,7 @@
     <main>
       <section id="pages" class="pane">
         <h2>Pages <span id="page-count"></span> <button id="collapse-all-btn" class="mini-btn" title="collapse/expand all page groups">collapse all</button></h2>
+        <div id="tab-strip" class="tab-strip" title="one tab per Chrome tab"></div>
         <div id="filter-bar" class="filter-bar">
           <div class="filter-row">
             <input id="text-filter" type="search" class="text-filter" placeholder="filter by domain / path…" />
@@ -70,6 +71,17 @@
         </div>
       </section>
     </main>
+    <div id="export-modal" class="modal hidden">
+      <div class="modal-card">
+        <h3>Export session</h3>
+        <p class="modal-hint">Choose which tabs to include. All are selected by default.</p>
+        <div id="export-tab-list" class="export-tab-list"></div>
+        <div class="modal-actions">
+          <button id="export-cancel" class="modal-btn">cancel</button>
+          <button id="export-confirm" class="modal-btn primary">export</button>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/shiki-hl.js"></script>
     <script src="/app.js"></script>
   </body>

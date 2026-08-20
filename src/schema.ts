@@ -1,6 +1,6 @@
 // Shared event types. One envelope per line in the session JSONL.
 
-export type EventKind = "http" | "ws" | "ui";
+export type EventKind = "http" | "ws" | "ui" | "tab";
 
 export interface TabRef {
   targetId: string;
@@ -17,7 +17,7 @@ export interface EventEnvelope {
   sessionId: string;
   kind: EventKind;
   tab: TabRef;
-  data: HttpEvent | WsEvent | UiEvent;
+  data: HttpEvent | WsEvent | UiEvent | TabEvent;
 }
 
 export interface HttpEvent {
@@ -82,12 +82,18 @@ export interface UiEvent {
   meta?: Record<string, unknown>;
 }
 
+/** Tab lifecycle marker. The envelope's `tab` ref carries the targetId +
+ *  latest url/title; `data.action` says what happened to that tab. */
+export interface TabEvent {
+  action: "open" | "close" | "update";
+}
+
 export interface SessionManifestEntry {
   sessionId: string;
   label?: string;
   path: string;
   startedAt: number;
   endedAt?: number;
-  counts: { http: number; ws: number; ui: number };
+  counts: { http: number; ws: number; ui: number; tab: number };
   hosts: Record<string, number>;
 }

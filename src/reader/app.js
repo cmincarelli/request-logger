@@ -22,8 +22,13 @@ const state = {
   textFilter: "",         // partial host/path substring (lowercased)
   typeFilter: "",         // resource-type select (Document/Fetch/XHR/Other/WS/UI)
   nearBottom: true,
-  groups: [],             // page groups in DOM order
+  tabs: [],               // [{ targetId, url, title, el }] one per Chrome tab
+  tabsById: new Map(),    // targetId -> tab entry
+  activeTabId: null,      // selected tab's targetId (pages list scoped to it)
+  groups: [],             // page groups in DOM order (active tab only)
   currentGroup: null,
+  selectedGroup: null,
+  seqToGroup: new Map(),
   allCollapsed: false,
   showAssets: false,
 };
@@ -57,6 +62,9 @@ function reset() {
   state.selected = null;
   state.renderedSeqs = new Set();
   state.nearBottom = true;
+  state.tabs = [];
+  state.tabsById = new Map();
+  state.activeTabId = null;
   state.groups = [];
   state.currentGroup = null;
   state.selectedGroup = null;
@@ -68,6 +76,7 @@ function reset() {
   updateChips();
   syncFilterInputs();
   $("collapse-all-btn").textContent = "collapse all";
+  $("tab-strip").innerHTML = "";
   $("page-list").innerHTML = "";
   $("inspector-body").innerHTML = '<p class="hint">select a request to inspect</p>';
   $("page-count").textContent = "";
@@ -75,11 +84,14 @@ function reset() {
 }
 
 let pollTimer = null;
+// Pull the next page of events. If the server signals more are available
+// (hasMore — happens on initial load of a huge session), keep paging
+// immediately instead of waiting for the next live-poll tick.
 async function poll() {
   if (!state.sessionId) return;
   try {
     const r = await fetch(
-      `/api/sessions/${encodeURIComponent(state.sessionId)}/events?since=${state.lastSeq}`
+      `/api/sessions/${encodeURIComponent(state.sessionId)}/events?since=${state.lastSeq}&limit=500`
     ).then((r) => r.json());
     if (r.ok && r.data.events.length) {
       const wasEmpty = state.events.length === 0;
@@ -87,8 +99,14 @@ async function poll() {
       state.lastSeq = r.data.lastSeq;
       for (const evt of r.data.events) appendEvent(evt);
       if (wasEmpty && state.selected == null) {
-        // pick the first real call that belongs to a page group (Document
-        // requests are boundaries, not children, so they have no group)
+        // Default to tab 1 (first tab by first-event order): make it active so
+        // its pages render, then auto-select its first real call so the
+        // inspector isn't empty on load.
+        if (state.activeTabId == null && state.tabs[0]) {
+          state.activeTabId = state.tabs[0].targetId;
+          for (const t of state.tabs) refreshTabButton(t);
+          rebuild();
+        }
         const firstCall = state.events.find((e) => e.kind === "http" && state.seqToGroup.has(e.seq));
         if (firstCall) selectBySeq(firstCall.seq);
         else if (state.groups[0]) setSelectedGroup(state.groups[0]);
@@ -96,8 +114,11 @@ async function poll() {
       if (state.nearBottom) $("page-list").scrollTop = $("page-list").scrollHeight;
       // refresh the graph if visible
       if (graphActive()) renderGraph();
+      // More buffered events to page through (huge session initial load):
+      // keep going immediately rather than waiting for the next tick.
+      if (r.data.hasMore) { poll(); return; }
     }
-    $("page-count").textContent = `(${state.groups.length} pages, ${state.events.length} events)`;
+    $("page-count").textContent = `(${state.tabs.length} tabs, ${state.groups.length} pages, ${state.events.length} events)`;
   } catch (e) {
     /* ignore transient */
   }
@@ -175,6 +196,21 @@ function appendEvent(evt) {
   if (state.renderedSeqs.has(evt.seq)) return;
   state.renderedSeqs.add(evt.seq);
 
+  // Tab lifecycle events drive the tab strip (open/close/update labels);
+  // they are not rendered as rows in the pages list.
+  if (evt.kind === "tab") {
+    handleTabEvent(evt);
+    return;
+  }
+
+  // Keep the tab's label fresh from this event's tab ref (covers old logs
+  // with no `tab` events, where tabs are derived from http/ws/ui events).
+  bumpTab(evt.tab);
+
+  // Only render events for the active tab. Events from other tabs stay
+  // buffered in state.events; switching tabs calls rebuild() to surface them.
+  if (state.activeTabId == null || evt.tab?.targetId !== state.activeTabId) return;
+
   const boundary = pageBoundary(evt);
   if (boundary) {
     // Every navigation opens a fresh group. The one exception: an `install` UI
@@ -198,6 +234,104 @@ function appendEvent(evt) {
   if (!matchesFilters(evt)) return;
   ensureGroup();
   appendChildRow(evt);
+}
+
+// Apply a `tab` lifecycle event to the strip: open → add button, update →
+// refresh label, close → remove button (and switch off it if it was active).
+function handleTabEvent(evt) {
+  const action = evt.data?.action;
+  const ref = evt.tab || {};
+  const targetId = ref.targetId || "(unknown)";
+  if (action === "close") {
+    const tab = state.tabsById.get(targetId);
+    if (tab) {
+      tab.el?.remove();
+      state.tabsById.delete(targetId);
+      state.tabs = state.tabs.filter((t) => t.targetId !== targetId);
+      // active tab closed: fall back to the first remaining tab
+      if (state.activeTabId === targetId) {
+        state.activeTabId = state.tabs[0]?.targetId || null;
+        for (const t of state.tabs) refreshTabButton(t);
+        rebuild();
+      }
+    }
+    return;
+  }
+  // open or update: get-or-create, then refresh label
+  let tab = state.tabsById.get(targetId);
+  if (!tab) {
+    tab = { targetId, url: ref.url || "", title: ref.title || "" };
+    addTabButton(tab);
+    state.tabs.push(tab);
+    state.tabsById.set(targetId, tab);
+  }
+  if (ref.url) tab.url = ref.url;
+  if (ref.title) tab.title = ref.title;
+  refreshTabButton(tab);
+}
+
+// Get-or-create a tab entry from an http/ws/ui event's tab ref. Used to keep
+// labels fresh and to derive tabs on old logs that have no `tab` events.
+function bumpTab(ref) {
+  const targetId = ref?.targetId || "(unknown)";
+  let tab = state.tabsById.get(targetId);
+  if (tab) {
+    if (ref.url) tab.url = ref.url;
+    if (ref.title) tab.title = ref.title;
+    refreshTabButton(tab);
+    return tab;
+  }
+  tab = { targetId, url: ref?.url || "", title: ref?.title || "" };
+  addTabButton(tab);
+  state.tabs.push(tab);
+  state.tabsById.set(targetId, tab);
+  return tab;
+}
+
+function addTabButton(tab) {
+  const el = document.createElement("button");
+  el.className = "tab-btn";
+  el.dataset.targetId = tab.targetId;
+  const label = document.createElement("span");
+  label.className = "tab-label";
+  label.textContent = tabLabel(tab);
+  el.append(label);
+  el.onclick = () => selectTab(tab.targetId);
+  tab.el = el;
+  $("tab-strip").appendChild(el);
+  refreshTabButton(tab);
+}
+
+function refreshTabButton(tab) {
+  if (!tab.el) return;
+  const label = tab.el.querySelector(".tab-label");
+  if (label) label.textContent = tabLabel(tab);
+  tab.el.title = tab.url || tab.targetId;
+  tab.el.classList.toggle("active", tab.targetId === state.activeTabId);
+}
+
+// Tab label: prefer the page title, fall back to host, then targetId prefix.
+function tabLabel(tab) {
+  const title = (tab.title || "").trim();
+  if (title) return title.length > 28 ? title.slice(0, 27) + "…" : title;
+  if (tab.url) { try { return new URL(tab.url).host; } catch { return tab.url; } }
+  return (tab.targetId || "").slice(0, 8);
+}
+
+// Selecting a tab scopes the pages list + inspector + graph to that tab.
+function selectTab(targetId) {
+  if (state.activeTabId === targetId) return;
+  state.activeTabId = targetId;
+  for (const t of state.tabs) refreshTabButton(t);
+  rebuild();
+  // reselect the first call of the new tab so the inspector/graph follow
+  const firstCall = state.events.find((e) => e.kind === "http" && e.tab?.targetId === targetId && state.seqToGroup.has(e.seq));
+  if (firstCall) selectBySeq(firstCall.seq);
+  else {
+    state.selected = null;
+    $("inspector-body").innerHTML = '<p class="hint">select a request to inspect</p>';
+    if (graphActive()) renderGraph();
+  }
 }
 
 function ensureGroup() {
@@ -281,14 +415,17 @@ function matchesFilter(evt) {
   return matchesFilters(evt);
 }
 
-// full rebuild (filter change / assets toggle / reset)
+// full rebuild (filter change / assets toggle / reset / tab switch)
 function rebuild() {
-  const list = $("page-list");
-  list.innerHTML = "";
+  $("page-list").innerHTML = "";
   state.groups = [];
   state.currentGroup = null;
   state.seqToGroup = new Map();
+  state.renderedSeqs = new Set();
   for (const evt of state.events) {
+    if (evt.kind === "tab") continue;
+    // only render events for the active tab
+    if (state.activeTabId != null && evt.tab?.targetId !== state.activeTabId) continue;
     const boundary = pageBoundary(evt);
     if (boundary) {
       // skip install UI marker when a Document for the same URL follows it
@@ -312,7 +449,7 @@ function rebuild() {
       if (g.count === 0) g.groupEl.remove();
     }
   }
-  $("page-count").textContent = `(${state.groups.length} pages, ${state.events.length} events)`;
+  $("page-count").textContent = `(${state.tabs.length} tabs, ${state.groups.length} pages, ${state.events.length} events)`;
 }
 
 // method/ui chip filters in the pages panel
@@ -418,12 +555,28 @@ function selectEvent(evt, row) {
   highlightRow(evt.seq);
   setSelectedGroup(state.seqToGroup.get(evt.seq) || null);
 }
-function renderInspector(evt) {
+// Fetch the selected event's bodies on demand and render the inspector.
+// Metadata-only events (from /events) lack requestBody/responseBody/payload,
+// so we fetch just this one event's bodies before rendering http/ws.
+async function renderInspector(evt) {
   const body = $("inspector-body");
+  body.innerHTML = '<p class="hint">loading…</p>';
+  let bodies = null;
+  if (evt.kind === "http" || evt.kind === "ws") {
+    try {
+      const r = await fetch(
+        `/api/sessions/${encodeURIComponent(state.sessionId)}/events/${evt.seq}/body`
+      ).then((r) => r.json());
+      if (r.ok) bodies = r.data.bodies;
+    } catch { /* offline / stale — render with no bodies */ }
+  }
+  // Merge bodies back into the event's data for the renderers, which already
+  // read h.requestBody / h.responseBody / w.payload. Keeps renderers unchanged.
+  const render = { ...evt, data: { ...evt.data, ...(bodies || {}) } };
   body.innerHTML = "";
-  if (evt.kind === "http") renderHttpInspector(evt, body);
-  else if (evt.kind === "ws") renderWsInspector(evt, body);
-  else renderUiInspector(evt, body);
+  if (render.kind === "http") renderHttpInspector(render, body);
+  else if (render.kind === "ws") renderWsInspector(render, body);
+  else renderUiInspector(render, body);
 }
 
 function renderHttpInspector(evt, body) {
@@ -685,10 +838,52 @@ function quote(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
 // ─── export / import session logs ────────────────────────────────────
 // Sessions are plain JSONL; export downloads the current one, import uploads
 // a previously-exported .jsonl so you can review past captures again.
+// Export opens a dialog listing every tab in the session (all checked by
+// default) so the user can choose which tabs to include — handy now that a
+// session can span many Chrome tabs.
 $("export-btn").onclick = () => {
   if (!state.sessionId) return;
+  const list = $("export-tab-list");
+  list.innerHTML = "";
+  if (!state.tabs.length) {
+    list.innerHTML = "<p class='hint'>no tabs in this session</p>";
+  }
+  // tally captured events (http/ws/ui) per tab so the modal shows accurate
+  // counts even after a rebuild (counts aren't cached on the tab object).
+  const counts = new Map();
+  for (const e of state.events) {
+    if (e.kind === "tab") continue;
+    const id = e.tab?.targetId || "(unknown)";
+    counts.set(id, (counts.get(id) || 0) + 1);
+  }
+  for (const t of state.tabs) {
+    const label = tabLabel(t) || t.targetId;
+    const n = counts.get(t.targetId) || 0;
+    const row = document.createElement("label");
+    row.className = "export-tab-row";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = true;
+    cb.dataset.targetId = t.targetId;
+    const txt = document.createElement("span");
+    txt.textContent = `${label} (${n})`;
+    txt.title = t.url || t.targetId;
+    row.append(cb, txt);
+    list.appendChild(row);
+  }
+  $("export-modal").classList.remove("hidden");
+};
+$("export-cancel").onclick = () => $("export-modal").classList.add("hidden");
+$("export-confirm").onclick = () => {
+  $("export-modal").classList.add("hidden");
+  if (!state.sessionId) return;
+  const checked = [...$("export-tab-list").querySelectorAll("input[type=checkbox]:checked")]
+    .map((cb) => encodeURIComponent(cb.dataset.targetId));
+  // no tabs selected → nothing to export
+  if (!checked.length) return;
+  const tabsQ = `?tabs=${checked.join(",")}`;
   const a = document.createElement("a");
-  a.href = `/api/sessions/${encodeURIComponent(state.sessionId)}/download`;
+  a.href = `/api/sessions/${encodeURIComponent(state.sessionId)}/download${tabsQ}`;
   a.download = `${state.sessionId}.jsonl`;
   document.body.appendChild(a);
   a.click();

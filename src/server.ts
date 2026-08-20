@@ -2,10 +2,13 @@ import Fastify from "fastify";
 import fastifyStatic from "@fastify/static";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
-import { writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, mkdirSync, createReadStream } from "node:fs";
+import { Readable } from "node:stream";
+import readline from "node:readline";
 import { config, newSessionId } from "./config.js";
-import { listSessions, readEvents, lastSeq } from "./log.js";
+import { listSessions, readEvents, readEventsMeta, readEventBodies, lastSeq } from "./log.js";
 import type { EventEnvelope, HttpEvent } from "./schema.js";
+import type { HttpMeta } from "./log.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -21,6 +24,18 @@ app.addContentTypeParser(
 await app.register(fastifyStatic, {
   root: join(__dirname, "reader"),
   prefix: "/",
+});
+
+// Serve the project's docs/agent-review.md raw at /docs so the guide for
+// reviewing a session is reachable in-app. Path is resolved relative to the
+// repo root (server.ts lives in src/), not hard-coded, so it stays portable.
+const DOCS_PATH = join(__dirname, "..", "docs", "agent-review.md");
+app.get("/docs", async (_req, reply) => {
+  if (!existsSync(DOCS_PATH))
+    return reply.code(404).send("docs/agent-review.md not found");
+  const md = readFileSync(DOCS_PATH, "utf8");
+  reply.type("text/plain; charset=utf-8");
+  return reply.send(md);
 });
 
 // ─── API ──────────────────────────────────────────────────────────────
@@ -40,8 +55,28 @@ app.get<{ Params: { id: string }; Querystring: { since?: string } }>(
     const s = sessions.find((x) => x.id === req.params.id);
     if (!s) return reply.code(404).send({ ok: false, error: "session not found" });
     const since = parseInt(req.query.since || "0", 10) || 0;
-    const events = readEvents(s.path, since);
-    return { ok: true, data: { events, lastSeq: events.length ? events[events.length - 1].seq : since } };
+    // Metadata-only + byte-budgeted: a page never carries bodies and is
+    // bounded by serialized size, so it can't exceed V8's max-string length
+    // regardless of body size in the file. The reader pages via lastSeq +
+    // hasMore until caught up, then live-polls.
+    const { events, lastSeq, hasMore } = await readEventsMeta(s.path, since);
+    return { ok: true, data: { events, lastSeq, hasMore } };
+  }
+);
+
+// One event's bodies (request/response/payload), fetched on demand when the
+// inspector opens an event. Cheap single-seq scan of the file.
+app.get<{ Params: { id: string; seq: string } }>(
+  "/api/sessions/:id/events/:seq/body",
+  async (req, reply) => {
+    const sessions = listSessions(config.logDir);
+    const s = sessions.find((x) => x.id === req.params.id);
+    if (!s) return reply.code(404).send({ ok: false, error: "session not found" });
+    const seq = parseInt(req.params.seq, 10);
+    if (!Number.isFinite(seq)) return reply.code(400).send({ ok: false, error: "bad seq" });
+    const bodies = await readEventBodies(s.path, seq);
+    if (!bodies) return reply.code(404).send({ ok: false, error: "event not found" });
+    return { ok: true, data: { bodies } };
   }
 );
 
@@ -52,7 +87,7 @@ app.get<{ Params: { id: string } }>(
     const sessions = listSessions(config.logDir);
     const s = sessions.find((x) => x.id === req.params.id);
     if (!s) return reply.code(404).send({ ok: false, error: "session not found" });
-    const events = readEvents(s.path, 0);
+    const { events } = await readEventsMeta(s.path, 0);
     const groups = new Map<string, {
       key: string;
       method: string;
@@ -60,7 +95,7 @@ app.get<{ Params: { id: string } }>(
       origin: string;
       count: number;
       statuses: Record<number, number>;
-      sample: HttpEvent | null;
+      sample: HttpMeta | null;
       lastT: number;
     }>();
     for (const evt of events) {
@@ -94,7 +129,7 @@ app.get<{ Params: { id: string } }>("/api/sessions/:id/auth", async (req, reply)
   const sessions = listSessions(config.logDir);
   const s = sessions.find((x) => x.id === req.params.id);
   if (!s) return reply.code(404).send({ ok: false, error: "session not found" });
-  const events = readEvents(s.path, 0);
+  const { events } = await readEventsMeta(s.path, 0);
   const auth = new Map<string, string>();
   for (const evt of events) {
     if (evt.kind !== "http") continue;
@@ -107,19 +142,41 @@ app.get<{ Params: { id: string } }>("/api/sessions/:id/auth", async (req, reply)
   return { ok: true, data: { auth: Object.fromEntries(auth) } };
 });
 
-app.get<{ Params: { id: string } }>("/api/sessions/:id/download", async (req, reply) => {
-  const sessions = listSessions(config.logDir);
-  const s = sessions.find((x) => x.id === req.params.id);
-  if (!s) return reply.code(404).send({ ok: false, error: "session not found" });
-  if (!existsSync(s.path)) return reply.code(404).send({ ok: false, error: "file missing" });
-  // stream the raw JSONL as an attachment
-  reply.header("Content-Type", "application/x-ndjson; charset=utf-8");
-  reply.header(
-    "Content-Disposition",
-    `attachment; filename="${req.params.id}.jsonl"`
-  );
-  return reply.send(readFileSync(s.path));
-});
+app.get<{ Params: { id: string }; Querystring: { tabs?: string } }>(
+  "/api/sessions/:id/download",
+  async (req, reply) => {
+    const sessions = listSessions(config.logDir);
+    const s = sessions.find((x) => x.id === req.params.id);
+    if (!s) return reply.code(404).send({ ok: false, error: "session not found" });
+    if (!existsSync(s.path)) return reply.code(404).send({ ok: false, error: "file missing" });
+    reply.header("Content-Type", "application/x-ndjson; charset=utf-8");
+    reply.header(
+      "Content-Disposition",
+      `attachment; filename="${req.params.id}.jsonl"`
+    );
+    // Stream the file rather than buffering it whole (a huge session can't
+    // be materialized as a single string/buffer).
+    const tabsParam = req.query.tabs;
+    const stream = createReadStream(s.path, { encoding: "utf8" });
+    if (!tabsParam) {
+      // whole file, verbatim
+      return reply.send(stream);
+    }
+    // ?tabs=id1,id2 — stream-filter to events from those targetIds.
+    const wanted = new Set(tabsParam.split(",").map((t) => t.trim()).filter(Boolean));
+    const filtered = new Readable({ read() {} });
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    for await (const line of rl) {
+      if (!line.trim()) continue;
+      try {
+        const evt = JSON.parse(line) as EventEnvelope;
+        if (wanted.has(evt.tab?.targetId || "")) filtered.push(line + "\n");
+      } catch { /* skip malformed */ }
+    }
+    filtered.push(null);
+    return reply.send(filtered);
+  }
+);
 
 // Import a previously-exported session JSONL. Body is the raw file content
 // (Content-Type: application/x-ndjson or text/plain). Writes it under LOG_DIR.
