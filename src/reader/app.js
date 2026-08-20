@@ -112,8 +112,8 @@ async function poll() {
         else if (state.groups[0]) setSelectedGroup(state.groups[0]);
       }
       if (state.nearBottom) $("page-list").scrollTop = $("page-list").scrollHeight;
-      // refresh the graph if visible
-      if (graphActive()) renderGraph();
+      // refresh the graph if visible (soft refresh — preserves pan/zoom)
+      if (graphActive()) refreshGraph();
       // More buffered events to page through (huge session initial load):
       // keep going immediately rather than waiting for the next tick.
       if (r.data.hasMore) { poll(); return; }
@@ -984,6 +984,13 @@ const graph = {
   canvas: null, ctx: null, raf: 0,
   nodes: [], edges: [], byHost: new Map(),
   hover: null,
+  // viewport transform: world = (screen - pan) / scale. Nodes live in world
+  // coordinates centred at (0,0); pan starts at canvas centre so they appear
+  // centred. Scroll zooms toward the cursor; drag pans.
+  scale: 1, panX: 0, panY: 0,
+  R0: 0, lastGroup: null,
+  // drag state: a drag moves the centre, a click (no/minimal move) filters.
+  dragging: false, dragMoved: false, dragX: 0, dragY: 0,
   // ephemeral selection so replay re-animates from scratch
   t0: 0,
 };
@@ -992,26 +999,68 @@ function initGraph() {
   graph.canvas = $("graph-canvas");
   if (!graph.canvas) return;
   graph.ctx = graph.canvas.getContext("2d");
-  // hover tooltip
+
+  // Convert a mouse event's screen position (CSS px, relative to canvas) to
+  // world coordinates, undoing the current zoom/pan transform. Used by both
+  // hover and click hit-testing so they stay accurate after pan/zoom.
+  function toWorld(e) {
+    const r = graph.canvas.getBoundingClientRect();
+    const mx = e.clientX - r.left, my = e.clientY - r.top;
+    return { x: (mx - graph.panX) / graph.scale, y: (my - graph.panY) / graph.scale, sx: mx, sy: my };
+  }
+  function hitNode(wx, wy) {
+    return graph.nodes.find((n) => Math.hypot(n.x - wx, n.y - wy) <= n.r + 4) || null;
+  }
+
+  // hover tooltip + cursor feedback
   graph.canvas.addEventListener("mousemove", (e) => {
-    const r = graph.canvas.getBoundingClientRect();
-    const mx = e.clientX - r.left, my = e.clientY - r.top;
-    graph.hover = graph.nodes.find((n) => Math.hypot(n.x - mx, n.y - my) <= n.r + 4) || null;
-    graph.canvas.style.cursor = graph.hover ? "pointer" : "default";
-    graph.canvas.title = graph.hover ? `${graph.hover.host}\n${graph.hover.calls} calls — click to filter pages` : "";
-  });
-  // click a node -> filter the pages list to that domain
-  graph.canvas.addEventListener("click", (e) => {
-    const r = graph.canvas.getBoundingClientRect();
-    const mx = e.clientX - r.left, my = e.clientY - r.top;
-    const hit = graph.nodes.find((n) => Math.hypot(n.x - mx, n.y - my) <= n.r + 4);
-    if (!hit) return;
-    // toggle: if already filtering to this host, clear it instead
-    if (state.textFilter === hit.host.toLowerCase()) {
-      state.textFilter = "";
-    } else {
-      state.textFilter = hit.host.toLowerCase();
+    if (graph.dragging) {
+      // panning: move the centre by the mouse delta
+      const dx = e.clientX - graph.dragX, dy = e.clientY - graph.dragY;
+      graph.panX += dx; graph.panY += dy;
+      graph.dragX = e.clientX; graph.dragY = e.clientY;
+      if (Math.hypot(dx, dy) > 2) graph.dragMoved = true;
+      graph.canvas.style.cursor = "grabbing";
+      return;
     }
+    const p = toWorld(e);
+    graph.hover = hitNode(p.x, p.y);
+    graph.canvas.style.cursor = graph.hover ? "pointer" : "grab";
+    graph.canvas.title = graph.hover ? `${graph.hover.host}\n${graph.hover.calls} calls — click to filter pages` : "scroll = zoom · drag = pan";
+  });
+
+  // scroll = zoom toward cursor (don't scroll the page while over the canvas)
+  graph.canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+    const newScale = Math.max(0.2, Math.min(12, graph.scale * factor));
+    if (newScale === graph.scale) return;
+    const p = toWorld(e);
+    // keep the world point under the cursor fixed: solve newPan so that
+    // (screen - newPan)/newScale == (screen - pan)/scale for this cursor.
+    graph.panX = p.sx - (p.sx - graph.panX) * (newScale / graph.scale);
+    graph.panY = p.sy - (p.sy - graph.panY) * (newScale / graph.scale);
+    graph.scale = newScale;
+  }, { passive: false });
+
+  // drag to pan; a click with negligible movement still filters a node.
+  graph.canvas.addEventListener("mousedown", (e) => {
+    graph.dragging = true; graph.dragMoved = false;
+    graph.dragX = e.clientX; graph.dragY = e.clientY;
+    graph.canvas.style.cursor = "grabbing";
+  });
+  window.addEventListener("mouseup", (e) => {
+    if (!graph.dragging) return;
+    graph.dragging = false;
+    graph.canvas.style.cursor = graph.hover ? "pointer" : "grab";
+    if (graph.dragMoved) return; // it was a pan, not a click — don't filter
+    const r = graph.canvas.getBoundingClientRect();
+    const wx = (e.clientX - r.left - graph.panX) / graph.scale;
+    const wy = (e.clientY - r.top - graph.panY) / graph.scale;
+    const hit = hitNode(wx, wy);
+    if (!hit) return;
+    if (state.textFilter === hit.host.toLowerCase()) state.textFilter = "";
+    else state.textFilter = hit.host.toLowerCase();
     $("text-filter").value = state.textFilter;
     rebuild();
   });
@@ -1082,7 +1131,10 @@ function renderGraph() {
   if (!nodes.length) {
     if (graph.raf) cancelAnimationFrame(graph.raf), (graph.raf = 0);
     const ctx = graph.ctx;
-    ctx.clearRect(0, 0, graph.canvas.clientWidth, graph.canvas.clientHeight);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, graph.canvas.width, graph.canvas.height);
+    const dpr = window.devicePixelRatio || 1;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = "#8a93a8"; ctx.font = "12px sans-serif";
     ctx.fillText("no calls in this page", 12, 20);
     graph.nodes = []; graph.edges = [];
@@ -1090,20 +1142,63 @@ function renderGraph() {
   }
   // spawn on a small gentle ring so nodes start separated (not clumped at
   // centre, which causes a violent expansion). Fade-in hides any residual jitter.
+  // Nodes live in world coords centred at (0,0); pan starts at canvas centre.
   const W = graph.canvas.clientWidth, H = graph.canvas.clientHeight;
-  const cx = W / 2, cy = H / 2;
-  const byHost = new Map(nodes.map((n) => [n.host, { ...n, x: cx, y: cy, vx: 0, vy: 0, r: 10 + Math.sqrt(n.calls) * 5 }]));
+  const byHost = new Map(nodes.map((n) => [n.host, { ...n, x: 0, y: 0, vx: 0, vy: 0, r: 10 + Math.sqrt(n.calls) * 5 }]));
   const R0 = Math.min(W, H) * 0.18;
   let i = 0;
   for (const n of byHost.values()) {
     const a = (i++ / byHost.size) * Math.PI * 2;
-    n.x = cx + Math.cos(a) * R0;
-    n.y = cy + Math.sin(a) * R0;
+    n.x = Math.cos(a) * R0;
+    n.y = Math.sin(a) * R0;
   }
   graph.nodes = [...byHost.values()];
   graph.edges = edges.map((e) => ({ ...e, from: byHost.get(e.from), to: byHost.get(e.to) })).filter((e) => e.from && e.to);
   graph.byHost = byHost;
+  // reset viewport: centred, no zoom. A fresh render shouldn't inherit a
+  // stale pan/zoom from a previous group.
+  graph.scale = 1; graph.panX = W / 2; graph.panY = H / 2;
+  graph.R0 = R0;                 // ring radius for placing new nodes on refresh
+  graph.lastGroup = state.selectedGroup;
   graph.t0 = performance.now();
+  if (!graph.raf) tickGraph();
+}
+
+// Soft refresh on live-poll data updates: rebuild node counts/edges from the
+// latest events but PRESERVE the viewport (pan/zoom) and existing node
+// positions so the graph doesn't snap back when new events stream in. New
+// hosts (not seen before) are placed on the same ring radius via the golden
+// angle so they spread out; existing hosts keep their spot. Called from poll().
+function refreshGraph() {
+  if (!graph.canvas) initGraph();
+  if (!graph.canvas) return;
+  // group changed (or first render / empty) since the last full render →
+  // fall back to a full render, which resets the viewport intentionally.
+  if (graph.lastGroup !== state.selectedGroup || !graph.nodes.length || !graph.byHost) {
+    renderGraph();
+    return;
+  }
+  const { nodes, edges } = buildGraphData();
+  if (!nodes.length) { renderGraph(); return; }
+  const R0 = graph.R0 || 100;
+  for (const nd of nodes) {
+    let existing = graph.byHost.get(nd.host);
+    if (existing) {
+      // update count + radius + colour in place; keep x/y
+      existing.calls = nd.calls;
+      existing.r = 10 + Math.sqrt(nd.calls) * 5;
+      existing.color = nd.color;
+    } else {
+      // new host: place on the ring via golden angle for even spread
+      const a = graph.nodes.length * 2.39996323;
+      existing = { ...nd, x: Math.cos(a) * R0, y: Math.sin(a) * R0, vx: 0, vy: 0, r: 10 + Math.sqrt(nd.calls) * 5 };
+      graph.byHost.set(nd.host, existing);
+      graph.nodes.push(existing);
+    }
+  }
+  // rebuild edges against the (possibly updated) node objects
+  graph.edges = edges.map((e) => ({ ...e, from: graph.byHost.get(e.from), to: graph.byHost.get(e.to) })).filter((e) => e.from && e.to);
+  // viewport intentionally untouched — pan/zoom survive
   if (!graph.raf) tickGraph();
 }
 
@@ -1116,8 +1211,15 @@ function tickGraph() {
 
 function drawGraph() {
   const ctx = graph.ctx;
-  const W = graph.canvas.clientWidth, H = graph.canvas.clientHeight;
-  ctx.clearRect(0, 0, W, H);
+  const canvas = graph.canvas;
+  // clear in device space so zoom/pan don't change the cleared region.
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const dpr = window.devicePixelRatio || 1;
+  // base transform: dpr (hi-dpi) composed with viewport (pan + zoom).
+  // screen = world * scale + pan, all in CSS px; dpr scales to device px.
+  ctx.setTransform(dpr * graph.scale, 0, 0, dpr * graph.scale, dpr * graph.panX, dpr * graph.panY);
+  const W = canvas.clientWidth, H = canvas.clientHeight;
   // edges with arrowheads
   for (const e of graph.edges) {
     const a = e.from, b = e.to;
@@ -1128,11 +1230,11 @@ function drawGraph() {
     const x1 = a.x + ux * a.r, y1 = a.y + uy * a.r;
     const x2 = b.x - ux * (b.r + 6), y2 = b.y - uy * (b.r + 6);
     ctx.strokeStyle = `rgba(140,160,190,${Math.min(0.85, 0.35 + e.w * 0.12)})`;
-    ctx.lineWidth = Math.min(4, 1 + Math.log2(1 + e.w));
+    ctx.lineWidth = Math.min(4, 1 + Math.log2(1 + e.w)) / graph.scale; // keep stroke visually constant
     ctx.beginPath();
     ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
     // arrowhead
-    const ah = 7;
+    const ah = 7 / graph.scale;
     ctx.fillStyle = ctx.strokeStyle;
     ctx.beginPath();
     ctx.moveTo(x2, y2);
@@ -1160,7 +1262,7 @@ function drawGraph() {
     ctx.fill();
     // core
     ctx.globalAlpha = fade * (graph.hover === n ? 1 : 0.95);
-    ctx.shadowBlur = 18 + pulse * 26;
+    ctx.shadowBlur = (18 + pulse * 26) / graph.scale;          // keep glow visually constant
     ctx.shadowColor = n.color;
     ctx.beginPath();
     ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
@@ -1168,17 +1270,26 @@ function drawGraph() {
     ctx.fill();
     ctx.restore();
     ctx.globalAlpha = 1;
-    ctx.lineWidth = graph.hover === n ? 2.5 : 1.5;
+    ctx.lineWidth = (graph.hover === n ? 2.5 : 1.5) / graph.scale;
     ctx.strokeStyle = "#fff"; ctx.stroke();
   }
-  // labels beside node with leader line, truncated
+  // labels beside node with leader line, truncated. Reset transform for text
+  // so font metrics / sizing stay stable regardless of zoom (otherwise text
+  // gets tiny/huge and measures wrong); positions are still computed in world
+  // coords then mapped to screen via the viewport.
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   for (const n of graph.nodes) {
-    const ang = Math.atan2(n.y - H / 2, n.x - W / 2) || 0;
-    const lx = n.x + Math.cos(ang) * (n.r + 6);
-    const ly = n.y + Math.sin(ang) * (n.r + 6);
+    // world -> screen
+    const nx = n.x * graph.scale + graph.panX;
+    const ny = n.y * graph.scale + graph.panY;
+    const nr = n.r * graph.scale;
+    // angle from canvas centre (screen space) for label placement
+    const ang = Math.atan2(ny - H / 2, nx - W / 2) || 0;
+    const lx = nx + Math.cos(ang) * (nr + 6);
+    const ly = ny + Math.sin(ang) * (nr + 6);
     // leader line
     ctx.strokeStyle = "#5a6478"; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(n.x + Math.cos(ang) * n.r, n.y + Math.sin(ang) * n.r);
+    ctx.beginPath(); ctx.moveTo(nx + Math.cos(ang) * nr, ny + Math.sin(ang) * nr);
     ctx.lineTo(lx, ly); ctx.stroke();
     // label (right of point if ang points right-ish, else left)
     const full = n.host;
