@@ -1103,11 +1103,22 @@ function buildGraphData() {
     if (!nd) { nd = { host, calls: 0, color: domainColor(host) }; nodes.set(host, nd); }
     nd.calls += n;
   };
+  // Case-insensitive Referer lookup on a request's headers. Returns the host
+  // or null. Used as the caller origin when the page group has no URL (e.g.
+  // the "(session start)" group) so edges aren't degenerate self-loops.
+  const refererHost = (headers) => {
+    if (!headers) return null;
+    for (const k in headers) if (k.toLowerCase() === "referer") return origin(headers[k]);
+    return null;
+  };
   for (const e of evts) {
     if (e.kind !== "http" && e.kind !== "ws") continue;
     const callee = origin(e.data.url);
     if (!callee) continue;
-    const caller = pageOrigin || callee; // page called it; if no page origin, self
+    // caller priority: the page's own origin (normal case) → the request's
+    // Referer header (blank/startup group, or a call whose referrer differs
+    // from a non-existent page url) → the callee itself (self-loop fallback).
+    const caller = pageOrigin || (e.kind === "http" ? refererHost(e.data.requestHeaders) : null) || callee;
     if (caller) bump(caller);
     bump(callee);
     const key = (caller || callee) + "\u0000" + callee;
