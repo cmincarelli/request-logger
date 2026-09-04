@@ -35,8 +35,7 @@ pnpm chrome
 # Terminal 2 — capture
 pnpm start
 
-# Terminal 3 — reader UI + API
-pnpm server
+# Browser Open reader UI
 # → http://127.0.0.1:3001
 ```
 
